@@ -11,10 +11,5 @@
       "src": "/(.*)",
       "dest": "/api/index.js"
     }
-  ],
-  "env": {
-    "HELIUS_API_KEY": "@helius_api_key",
-    "DISTRIBUTION_WALLET_ADDRESS": "@distribution_wallet_address",
-    "TAX_CONTRACT_ADDRESS": "@tax_contract_address"
-  }
+  ]
 } 
