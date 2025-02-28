@@ -4,7 +4,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const { setTimeout } = require('timers/promises');
+const { setTimeout: setTimeoutPromise } = require('timers/promises');
+const nodeSetTimeout = global.setTimeout;
 
 // Updated configuration for better rate limiting (2025-02-28)
 const CONFIG = {
@@ -45,7 +46,7 @@ class RateLimiter {
     if (this.lastRateLimitTime && (now - this.lastRateLimitTime) < this.cooldownPeriod) {
       const remainingCooldown = this.cooldownPeriod - (now - this.lastRateLimitTime);
       console.log(`In cooldown period after rate limit. Waiting ${remainingCooldown}ms before next request`);
-      await setTimeout(remainingCooldown);
+      await setTimeoutPromise(remainingCooldown);
     }
     
     // Add extra delay if we've had consecutive errors
@@ -55,7 +56,7 @@ class RateLimiter {
     
     if (timeToWait > 0) {
       console.log(`Rate limiting: waiting ${timeToWait}ms before next request (consecutive errors: ${this.consecutiveErrors})`);
-      await setTimeout(timeToWait);
+      await setTimeoutPromise(timeToWait);
     }
     
     this.lastRequestTime = Date.now();
@@ -99,7 +100,7 @@ class RateLimiter {
         
         const waitTime = CONFIG.rateLimits.initialBackoff * Math.pow(2, this.consecutiveErrors - 1);
         console.log(`Rate limit hit, waiting ${waitTime}ms before continuing (consecutive errors: ${this.consecutiveErrors})...`);
-        await setTimeout(waitTime);
+        await setTimeoutPromise(waitTime);
         
         // Put the request back at the front of the queue if we haven't exceeded max retries
         if (this.consecutiveErrors <= CONFIG.rateLimits.maxRetries) {
@@ -116,7 +117,8 @@ class RateLimiter {
       }
     } finally {
       // Continue processing queue after a delay
-      setTimeout(() => this.processQueue(), 1000);
+      // Use Node's standard setTimeout for callback-style usage
+      nodeSetTimeout(() => this.processQueue(), 1000);
     }
   }
 
@@ -284,7 +286,7 @@ async function fetchTransactions() {
         // Add a significant delay between processing signatures
         if (signaturesToProcess.indexOf(sig) < signaturesToProcess.length - 1) {
           console.log(`Waiting ${CONFIG.rateLimits.batchDelay}ms before processing next signature...`);
-          await setTimeout(CONFIG.rateLimits.batchDelay);
+          await setTimeoutPromise(CONFIG.rateLimits.batchDelay);
         }
       } catch (error) {
         console.error(`Error processing signature ${sig.signature}:`, error.message);
@@ -363,11 +365,11 @@ async function getTransactionDetails(signature) {
       if (error.response && error.response.status === 429 && retries <= maxRetries) {
         const waitTime = Math.pow(2, retries) * CONFIG.rateLimits.retryDelay; // Exponential backoff
         console.log(`Rate limit hit, retrying in ${waitTime}ms (attempt ${retries}/${maxRetries})...`);
-        await setTimeout(waitTime);
+        await setTimeoutPromise(waitTime);
       } else if (retries <= maxRetries) {
         // For other errors, wait a bit less before retrying
         console.log(`Error fetching transaction, retrying in 5000ms (attempt ${retries}/${maxRetries})...`);
-        await setTimeout(5000);
+        await setTimeoutPromise(5000);
       } else {
         // We've exhausted our retries
         console.error(`Error getting transaction details for ${signature} after ${maxRetries} retries:`, error.message);
