@@ -250,7 +250,7 @@ const storage = {
           
           // List blobs to check if our data exists
           const blobs = await list();
-          console.log('Available blobs:', blobs);
+          console.log(`Available blobs: ${blobs.blobs.length}`);
           
           // Find our data blob in the list
           const dataBlob = blobs.blobs.find(blob => 
@@ -258,7 +258,7 @@ const storage = {
           );
           
           if (dataBlob) {
-            console.log(`Found data blob: ${dataBlob.pathname}`);
+            console.log(`Found data blob: ${dataBlob.pathname}, size: ${dataBlob.size} bytes`);
             // Get the blob content using the URL
             const response = await fetch(dataBlob.url);
             if (response.ok) {
@@ -272,6 +272,16 @@ const storage = {
                   transactions.push(...storedData.transactions);
                   lastFetchTimestamp = storedData.lastFetchTimestamp || new Date().toISOString();
                   console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
+                  
+                  // If we have fewer than expected transactions, try to fetch more
+                  if (transactions.length < 40) {
+                    console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
+                    // Trigger a fetch of more transactions in the background
+                    fetchAllHistoricalTransactions().catch(err => 
+                      console.error('Error fetching additional historical transactions:', err)
+                    );
+                  }
+                  
                   return true;
                 }
               } catch (parseError) {
@@ -281,7 +291,11 @@ const storage = {
               console.error(`Failed to fetch blob: ${response.status} ${response.statusText}`);
             }
           } else {
-            console.log('Blob not found in the list');
+            console.log('Blob not found in the list, will fetch fresh data');
+            // If no blob found, trigger a historical fetch
+            fetchAllHistoricalTransactions().catch(err => 
+              console.error('Error fetching historical transactions after blob not found:', err)
+            );
           }
         } catch (blobError) {
           console.error('Error loading from Vercel Blob:', blobError);
@@ -444,7 +458,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 20) { // Changed back to 20 from 100
+async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 100
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -481,8 +495,8 @@ async function fetchTransactionsVercel(limit = 20) { // Changed back to 20 from 
     const signatures = response.data.result;
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
-    // For Vercel, we'll fetch transaction details for a limited number of transactions
-    const maxToProcess = Math.min(signatures.length, 10); // Changed back to 10 from 50
+    // For Vercel, we'll fetch transaction details for a larger number of transactions
+    const maxToProcess = Math.min(signatures.length, 50); // Increased from 10 to 50
     const processedTransactions = [];
     
     // Start time tracking
@@ -1182,9 +1196,18 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
     if (loadedFromStorage && transactions.length > 0) {
       console.log(`Using ${transactions.length} transactions from storage`);
       fetchedTransactions = transactions;
+      
+      // If we have fewer than expected transactions, try to fetch more
+      if (transactions.length < 40) {
+        console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
+        // Trigger a fetch of more transactions in the background
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error fetching additional historical transactions:', err)
+        );
+      }
     } else {
-      // If no stored data, fetch fresh data
-      fetchedTransactions = await fetchTransactionsVercel(20);
+      // If no stored data, fetch fresh data and then trigger historical fetch
+      fetchedTransactions = await fetchTransactionsVercel(100); // Increased from 20 to 100
       
       // Save the fetched transactions to storage
       if (fetchedTransactions.length > 0) {
@@ -1192,6 +1215,12 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
         transactions.push(...fetchedTransactions);
         lastFetchTimestamp = new Date().toISOString();
         await storage.save();
+        
+        // After saving initial transactions, fetch historical data
+        console.log('Triggering historical transaction fetch after initial load...');
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error fetching historical transactions after initial load:', err)
+        );
       }
     }
     
@@ -1297,9 +1326,18 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
     if (loadedFromStorage && transactions.length > 0) {
       console.log(`Using ${transactions.length} transactions from storage`);
       fetchedTransactions = transactions;
+      
+      // If we have fewer than expected transactions, try to fetch more
+      if (transactions.length < 40) {
+        console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
+        // Trigger a fetch of more transactions in the background
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error fetching additional historical transactions:', err)
+        );
+      }
     } else {
-      // If no stored data, fetch fresh data
-      fetchedTransactions = await fetchTransactionsVercel(20);
+      // If no stored data, fetch fresh data and then trigger historical fetch
+      fetchedTransactions = await fetchTransactionsVercel(100); // Increased from 20 to 100
       
       // Save the fetched transactions to storage
       if (fetchedTransactions.length > 0) {
@@ -1307,6 +1345,12 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
         transactions.push(...fetchedTransactions);
         lastFetchTimestamp = new Date().toISOString();
         await storage.save();
+        
+        // After saving initial transactions, fetch historical data
+        console.log('Triggering historical transaction fetch after initial load...');
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error fetching historical transactions after initial load:', err)
+        );
       }
     }
     
@@ -1759,13 +1803,13 @@ async function fetchAllHistoricalTransactions() {
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
-    const batchSize = 20; // Changed from 50 to 20
+    const batchSize = 50; // Increased from 20 to 50
     let batchCount = 0;
-    const maxBatches = 10; // Limit to 10 batches (200 transactions) per run to avoid timeouts
+    const maxBatches = 20; // Increased from 10 to 20 batches (1000 transactions) per run
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 12000; // 12 seconds max processing time
+    const timeLimit = 13000; // Increased from 12 to 13 seconds max processing time
     
     while (hasMore && batchCount < maxBatches) {
       // Check if we're approaching the time limit
