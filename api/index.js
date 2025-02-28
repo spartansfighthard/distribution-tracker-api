@@ -16,7 +16,7 @@ const STORAGE_CONFIG = {
   vercelBlobEnabled: true, // Always enable Blob storage
   storageKey: 'transactions_data',
   blobStoragePath: 'transactions/data.json',
-  maxStoredTransactions: 10000, // Increased from 100 to 1000
+  maxStoredTransactions: 10000, // Store up to 10,000 transactions
   storageInterval: 10 * 1000, // How often to save data (10 seconds)
   lastStorageTime: null
 };
@@ -432,7 +432,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 100
+async function fetchTransactionsVercel(limit = 20) { // Changed back to 20 from 100
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -470,7 +470,7 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
     // For Vercel, we'll fetch transaction details for a limited number of transactions
-    const maxToProcess = Math.min(signatures.length, 50); // Increased from 10 to 50
+    const maxToProcess = Math.min(signatures.length, 10); // Changed back to 10 from 50
     const processedTransactions = [];
     
     // Start time tracking
@@ -1065,7 +1065,7 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         fetchedTransactions = transactions;
       } else {
         // If no stored data, fetch fresh data
-        fetchedTransactions = await fetchTransactionsVercel(100);
+        fetchedTransactions = await fetchTransactionsVercel(20);
         
         // Save the fetched transactions to storage
         if (fetchedTransactions.length > 0) {
@@ -1164,7 +1164,7 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(100);
+    const fetchedTransactions = await fetchTransactionsVercel(20);
     
     // Get transactions with type 'sent'
     const sentTransactions = fetchedTransactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
@@ -1247,7 +1247,7 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(100);
+    const fetchedTransactions = await fetchTransactionsVercel(20);
     
     // Get transactions for SOL
     const solTransactions = fetchedTransactions.filter(tx => tx.token === 'SOL');
@@ -1326,7 +1326,7 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
         : 0
     },
     balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0),
-    recentTransactions: solTransactions.slice(0, 3)
+    recentTransactions: solTransactions.slice(0, 5)
   };
   
   // Return statistics
@@ -1347,7 +1347,7 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
       // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(100);
+      const fetchedTransactions = await fetchTransactionsVercel(20);
       
       // Return simplified response
       return res.json({
@@ -1589,7 +1589,8 @@ if (process.env.TELEGRAM_BOT_TOKEN && !process.env.VERCEL) {
               ? sent.reduce((sum, tx) => sum + tx.amount, 0) / sent.length 
               : 0
           },
-          balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0)
+          balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0),
+          recentTransactions: solTransactions.slice(0, 5)
         };
         
         // Format message
@@ -1671,9 +1672,9 @@ async function fetchAllHistoricalTransactions() {
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
-    const batchSize = 50;
+    const batchSize = 20; // Changed from 50 to 20
     let batchCount = 0;
-    const maxBatches = 10; // Limit to 10 batches (500 transactions) per run to avoid timeouts
+    const maxBatches = 10; // Limit to 10 batches (200 transactions) per run to avoid timeouts
     
     // Start time tracking
     const startTime = Date.now();
