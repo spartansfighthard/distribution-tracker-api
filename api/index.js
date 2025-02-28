@@ -16,8 +16,8 @@ const STORAGE_CONFIG = {
   vercelBlobEnabled: true, // Always enable Blob storage
   storageKey: 'transactions_data',
   blobStoragePath: 'transactions/data.json',
-  maxStoredTransactions: 100, // Maximum number of transactions to store
-  storageInterval: 10 * 1000, // How often to save data (10 seconds - reduced from 60)
+  maxStoredTransactions: 1000, // Increased from 100 to 1000
+  storageInterval: 10 * 1000, // How often to save data (10 seconds)
   lastStorageTime: null
 };
 
@@ -432,7 +432,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 20) {
+async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 100
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -470,7 +470,7 @@ async function fetchTransactionsVercel(limit = 20) {
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
     // For Vercel, we'll fetch transaction details for a limited number of transactions
-    const maxToProcess = Math.min(signatures.length, 10);
+    const maxToProcess = Math.min(signatures.length, 50); // Increased from 10 to 50
     const processedTransactions = [];
     
     // Start time tracking
@@ -585,14 +585,28 @@ async function fetchTransactionsVercel(limit = 20) {
     
     // Store the processed transactions in memory
     if (processedTransactions.length > 0) {
-      // Clear existing transactions and add the new ones
-      transactions.length = 0;
-      transactions.push(...processedTransactions);
-      lastFetchTimestamp = new Date().toISOString();
+      // Load existing transactions from storage first
+      await storage.load();
       
-      // Save to persistent storage
-      console.log('[Vercel] Saving processed transactions to Blob storage...');
-      await storage.save();
+      // Add new transactions, avoiding duplicates
+      const existingSignatures = new Set(transactions.map(tx => tx.signature));
+      const newUniqueTransactions = processedTransactions.filter(tx => !existingSignatures.has(tx.signature));
+      
+      if (newUniqueTransactions.length > 0) {
+        console.log(`[Vercel] Adding ${newUniqueTransactions.length} new unique transactions to storage`);
+        transactions.push(...newUniqueTransactions);
+        
+        // Sort transactions by blockTime (newest first)
+        transactions.sort((a, b) => b.blockTime - a.blockTime);
+        
+        lastFetchTimestamp = new Date().toISOString();
+        
+        // Save to persistent storage
+        console.log('[Vercel] Saving all transactions to Blob storage...');
+        await storage.save();
+      } else {
+        console.log('[Vercel] No new unique transactions to add');
+      }
     }
     
     return processedTransactions;
@@ -1051,7 +1065,7 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         fetchedTransactions = transactions;
       } else {
         // If no stored data, fetch fresh data
-        fetchedTransactions = await fetchTransactionsVercel(20);
+        fetchedTransactions = await fetchTransactionsVercel(100);
         
         // Save the fetched transactions to storage
         if (fetchedTransactions.length > 0) {
@@ -1150,7 +1164,7 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(20);
+    const fetchedTransactions = await fetchTransactionsVercel(100);
     
     // Get transactions with type 'sent'
     const sentTransactions = fetchedTransactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
@@ -1233,7 +1247,7 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(20);
+    const fetchedTransactions = await fetchTransactionsVercel(100);
     
     // Get transactions for SOL
     const solTransactions = fetchedTransactions.filter(tx => tx.token === 'SOL');
@@ -1333,7 +1347,7 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
       // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(20);
+      const fetchedTransactions = await fetchTransactionsVercel(100);
       
       // Return simplified response
       return res.json({
@@ -1638,6 +1652,258 @@ if (process.env.TELEGRAM_BOT_TOKEN && !process.env.VERCEL) {
     console.warn('Failed to initialize Telegram bot:', error.message);
   }
 }
+
+// Add a function to fetch historical transactions with pagination
+async function fetchAllHistoricalTransactions() {
+  try {
+    console.log('[Vercel] Starting historical transaction fetch...');
+    
+    if (!HELIUS_API_KEY || !HELIUS_RPC_URL || !DISTRIBUTION_WALLET_ADDRESS) {
+      console.error('Missing required environment variables for Helius service');
+      return [];
+    }
+    
+    // First, load any existing transactions
+    await storage.load();
+    const existingSignatures = new Set(transactions.map(tx => tx.signature));
+    console.log(`[Vercel] Loaded ${existingSignatures.size} existing transaction signatures`);
+    
+    let allNewTransactions = [];
+    let hasMore = true;
+    let beforeSignature = null;
+    const batchSize = 50;
+    let batchCount = 0;
+    const maxBatches = 10; // Limit to 10 batches (500 transactions) per run to avoid timeouts
+    
+    // Start time tracking
+    const startTime = Date.now();
+    const timeLimit = 12000; // 12 seconds max processing time
+    
+    while (hasMore && batchCount < maxBatches) {
+      // Check if we're approaching the time limit
+      if (Date.now() - startTime > timeLimit) {
+        console.log(`[Vercel] Approaching time limit, stopping after processing ${batchCount} batches`);
+        break;
+      }
+      
+      batchCount++;
+      console.log(`[Vercel] Fetching batch ${batchCount} of signatures (before: ${beforeSignature || 'none'})...`);
+      
+      // Prepare request data
+      const requestData = {
+        jsonrpc: '2.0',
+        id: 'my-id',
+        method: 'getSignaturesForAddress',
+        params: [
+          DISTRIBUTION_WALLET_ADDRESS,
+          {
+            limit: batchSize,
+            before: beforeSignature
+          }
+        ]
+      };
+      
+      // Make direct request to Helius API
+      const response = await axios.post(HELIUS_RPC_URL, requestData);
+      
+      // Check if response is valid
+      if (!response.data || !response.data.result || response.data.result.length === 0) {
+        console.log('[Vercel] No more signatures found or invalid response');
+        hasMore = false;
+        break;
+      }
+      
+      // Get signatures from response
+      const signatures = response.data.result;
+      console.log(`[Vercel] Fetched ${signatures.length} signatures in batch ${batchCount}`);
+      
+      // Update beforeSignature for next batch
+      if (signatures.length > 0) {
+        beforeSignature = signatures[signatures.length - 1].signature;
+      } else {
+        hasMore = false;
+      }
+      
+      // Filter out signatures we already have
+      const newSignatures = signatures.filter(sig => !existingSignatures.has(sig.signature));
+      console.log(`[Vercel] Found ${newSignatures.length} new signatures in batch ${batchCount}`);
+      
+      if (newSignatures.length === 0) {
+        // If we've reached signatures we already have, we can stop
+        if (signatures.length > 0 && existingSignatures.has(signatures[0].signature)) {
+          console.log('[Vercel] Reached signatures that are already in storage, stopping');
+          hasMore = false;
+          break;
+        }
+        
+        // Otherwise continue to next batch
+        continue;
+      }
+      
+      // Process new signatures
+      const batchProcessedTransactions = [];
+      const batchStartTime = Date.now();
+      
+      for (let i = 0; i < newSignatures.length; i++) {
+        // Check if we're approaching the time limit
+        if (Date.now() - startTime > timeLimit) {
+          console.log(`[Vercel] Approaching overall time limit, stopping signature processing`);
+          break;
+        }
+        
+        const sig = newSignatures[i];
+        try {
+          // Prepare request for transaction details
+          const txRequestData = {
+            jsonrpc: '2.0',
+            id: 'tx-details',
+            method: 'getTransaction',
+            params: [
+              sig.signature,
+              {
+                encoding: 'jsonParsed',
+                maxSupportedTransactionVersion: 0
+              }
+            ]
+          };
+          
+          // Make direct request without rate limiting
+          const txResponse = await axios.post(HELIUS_RPC_URL, txRequestData);
+          
+          if (!txResponse.data || !txResponse.data.result) {
+            console.log(`[Vercel] Invalid response for transaction ${sig.signature}`);
+            continue;
+          }
+          
+          const txData = txResponse.data.result;
+          
+          // Basic transaction data
+          const transaction = {
+            signature: sig.signature,
+            blockTime: txData.blockTime || sig.blockTime,
+            slot: txData.slot || sig.slot,
+            timestamp: new Date((txData.blockTime || sig.blockTime) * 1000).toISOString(),
+            type: 'unknown',
+            amount: 0,
+            token: 'SOL'
+          };
+          
+          // Try to determine transaction type and details
+          if (txData && txData.meta && !txData.meta.err) {
+            const preBalances = txData.meta.preBalances;
+            const postBalances = txData.meta.postBalances;
+            const accountKeys = txData.transaction.message.accountKeys;
+            
+            if (preBalances && postBalances && accountKeys) {
+              // Find index of distribution wallet
+              const walletIndex = accountKeys.findIndex(key => 
+                key.pubkey === DISTRIBUTION_WALLET_ADDRESS
+              );
+              
+              if (walletIndex >= 0) {
+                const preBal = preBalances[walletIndex];
+                const postBal = postBalances[walletIndex];
+                const diff = postBal - preBal;
+                
+                if (diff > 0) {
+                  // Received SOL
+                  transaction.type = 'received';
+                  transaction.amount = diff / 1e9; // Convert lamports to SOL
+                  transaction.token = 'SOL';
+                  transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
+                  
+                  // Try to determine sender
+                  const senderIndex = preBalances.findIndex((bal, i) => 
+                    i !== walletIndex && preBalances[i] > postBalances[i]
+                  );
+                  if (senderIndex >= 0) {
+                    transaction.sender = accountKeys[senderIndex].pubkey;
+                  }
+                } else if (diff < 0) {
+                  // Sent SOL
+                  transaction.type = 'sent';
+                  transaction.amount = Math.abs(diff) / 1e9; // Convert lamports to SOL
+                  transaction.token = 'SOL';
+                  transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
+                  
+                  // Try to determine receiver
+                  const receiverIndex = preBalances.findIndex((bal, i) => 
+                    i !== walletIndex && preBalances[i] < postBalances[i]
+                  );
+                  if (receiverIndex >= 0) {
+                    transaction.receiver = accountKeys[receiverIndex].pubkey;
+                  }
+                }
+              }
+            }
+          }
+          
+          batchProcessedTransactions.push(transaction);
+          existingSignatures.add(transaction.signature); // Add to our tracking set
+          
+        } catch (error) {
+          console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
+          // Continue with next signature
+          continue;
+        }
+      }
+      
+      console.log(`[Vercel] Processed ${batchProcessedTransactions.length} transactions in batch ${batchCount} (${Date.now() - batchStartTime}ms)`);
+      allNewTransactions = [...allNewTransactions, ...batchProcessedTransactions];
+      
+      // Save after each batch to avoid losing progress
+      if (batchProcessedTransactions.length > 0) {
+        transactions.push(...batchProcessedTransactions);
+        
+        // Sort transactions by blockTime (newest first)
+        transactions.sort((a, b) => b.blockTime - a.blockTime);
+        
+        lastFetchTimestamp = new Date().toISOString();
+        
+        // Save to persistent storage
+        console.log(`[Vercel] Saving batch ${batchCount} to Blob storage (${transactions.length} total transactions)...`);
+        await storage.save();
+      }
+    }
+    
+    console.log(`[Vercel] Historical fetch complete. Added ${allNewTransactions.length} new transactions in ${batchCount} batches.`);
+    return allNewTransactions;
+  } catch (error) {
+    console.error('[Vercel] Error in historical transaction fetch:', error.message);
+    return [];
+  }
+}
+
+// Add a new endpoint to trigger historical fetch
+app.get('/api/fetch-all', asyncHandler(async (req, res) => {
+  console.log('Starting full historical transaction fetch...');
+  
+  try {
+    // Start the historical fetch
+    const newTransactions = await fetchAllHistoricalTransactions();
+    
+    // Return response
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      message: 'Historical transaction fetch completed',
+      newTransactionsCount: newTransactions.length,
+      totalTransactionsCount: transactions.length,
+      note: 'This process fetches transactions in batches and may not get all transactions in a single run due to serverless time constraints.'
+    });
+  } catch (error) {
+    console.error('Error in /api/fetch-all:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to fetch all historical transactions',
+        details: error.message
+      }
+    });
+  }
+}));
 
 // 404 handler
 app.use((req, res, next) => {
