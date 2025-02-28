@@ -1,0 +1,5 @@
+[33mcommit 688f3a5cf89c8fb53780477f5e25253403b67523[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m)[m
+Author: spartansfighthard <spartansfighthard@proton.me>
+Date:   Fri Feb 28 16:15:31 2025 -0600
+
+    Fix: Add API key headers to all Helius API requests

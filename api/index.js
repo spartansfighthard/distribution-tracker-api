@@ -718,6 +718,12 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
 
 // Fetch transactions from Helius API - Optimized for serverless
 async function fetchTransactions(limit = CONFIG.transactions.maxTransactionsToFetch) {
+  // Check if data collection is disabled
+  if (process.env.DISABLE_DATA_COLLECTION === 'true') {
+    console.log('Data collection is temporarily disabled');
+    return [];
+  }
+  
   // For Vercel, use the simplified direct fetch
   if (process.env.VERCEL) {
     // Try to load from storage first
