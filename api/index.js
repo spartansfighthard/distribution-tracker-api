@@ -5,7 +5,19 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const { setTimeout: setTimeoutPromise } = require('timers/promises');
+const fs = require('fs').promises;
+const path = require('path');
 const nodeSetTimeout = global.setTimeout;
+
+// Storage configuration
+const STORAGE_CONFIG = {
+  localFilePath: path.join(process.cwd(), 'data', 'transactions.json'),
+  vercelKVEnabled: process.env.VERCEL_KV_URL ? true : false,
+  storageKey: 'transactions_data',
+  maxStoredTransactions: 100, // Maximum number of transactions to store
+  storageInterval: 60 * 1000, // How often to save data (1 minute)
+  lastStorageTime: null
+};
 
 // Updated configuration for better rate limiting (2025-02-28)
 const CONFIG = {
@@ -186,6 +198,171 @@ app.use((req, res, next) => {
   next();
 });
 
+// Storage functions for transaction persistence
+const storage = {
+  // Initialize storage
+  async init() {
+    try {
+      if (process.env.VERCEL) {
+        console.log('Initializing Vercel storage...');
+        // For Vercel, we'll check if we can use KV storage
+        if (STORAGE_CONFIG.vercelKVEnabled) {
+          console.log('Vercel KV storage is enabled');
+          // We'll initialize KV storage when needed
+        } else {
+          console.log('Vercel KV storage is not enabled, using in-memory storage only');
+        }
+      } else {
+        console.log('Initializing local file storage...');
+        // For local development, ensure the data directory exists
+        const dataDir = path.dirname(STORAGE_CONFIG.localFilePath);
+        try {
+          await fs.mkdir(dataDir, { recursive: true });
+          console.log(`Created data directory: ${dataDir}`);
+        } catch (err) {
+          if (err.code !== 'EEXIST') {
+            console.error('Error creating data directory:', err);
+          }
+        }
+        
+        // Try to load existing data
+        await this.load();
+      }
+    } catch (error) {
+      console.error('Error initializing storage:', error);
+    }
+  },
+  
+  // Load transactions from storage
+  async load() {
+    try {
+      if (process.env.VERCEL) {
+        if (STORAGE_CONFIG.vercelKVEnabled) {
+          // If we have Vercel KV, use it
+          try {
+            const { createClient } = require('@vercel/kv');
+            const kv = createClient({
+              url: process.env.VERCEL_KV_URL,
+              token: process.env.VERCEL_KV_TOKEN
+            });
+            
+            const storedData = await kv.get(STORAGE_CONFIG.storageKey);
+            if (storedData) {
+              const parsedData = JSON.parse(storedData);
+              if (parsedData.transactions && Array.isArray(parsedData.transactions)) {
+                // Clear existing transactions and add loaded ones
+                transactions.length = 0;
+                transactions.push(...parsedData.transactions);
+                lastFetchTimestamp = parsedData.lastFetchTimestamp || new Date().toISOString();
+                console.log(`Loaded ${transactions.length} transactions from Vercel KV storage`);
+                return true;
+              }
+            }
+          } catch (kvError) {
+            console.error('Error loading from Vercel KV:', kvError);
+          }
+        }
+        // If KV failed or isn't available, we'll use fresh data
+        return false;
+      } else {
+        // For local development, load from file
+        try {
+          const data = await fs.readFile(STORAGE_CONFIG.localFilePath, 'utf8');
+          const parsedData = JSON.parse(data);
+          if (parsedData.transactions && Array.isArray(parsedData.transactions)) {
+            // Clear existing transactions and add loaded ones
+            transactions.length = 0;
+            transactions.push(...parsedData.transactions);
+            lastFetchTimestamp = parsedData.lastFetchTimestamp || new Date().toISOString();
+            console.log(`Loaded ${transactions.length} transactions from local file storage`);
+            return true;
+          }
+        } catch (fileError) {
+          if (fileError.code !== 'ENOENT') {
+            console.error('Error loading from file:', fileError);
+          } else {
+            console.log('No existing transaction file found, starting fresh');
+          }
+        }
+        return false;
+      }
+    } catch (error) {
+      console.error('Error loading transactions:', error);
+      return false;
+    }
+  },
+  
+  // Save transactions to storage
+  async save() {
+    try {
+      // Only save if we have transactions and enough time has passed since last save
+      if (transactions.length === 0) {
+        console.log('No transactions to save');
+        return false;
+      }
+      
+      const now = Date.now();
+      if (STORAGE_CONFIG.lastStorageTime && 
+          (now - STORAGE_CONFIG.lastStorageTime) < STORAGE_CONFIG.storageInterval) {
+        console.log('Skipping save, not enough time has passed since last save');
+        return false;
+      }
+      
+      // Limit the number of transactions we store
+      const transactionsToStore = transactions.slice(0, STORAGE_CONFIG.maxStoredTransactions);
+      
+      // Prepare data to store
+      const dataToStore = {
+        transactions: transactionsToStore,
+        lastFetchTimestamp,
+        savedAt: new Date().toISOString()
+      };
+      
+      if (process.env.VERCEL) {
+        if (STORAGE_CONFIG.vercelKVEnabled) {
+          // If we have Vercel KV, use it
+          try {
+            const { createClient } = require('@vercel/kv');
+            const kv = createClient({
+              url: process.env.VERCEL_KV_URL,
+              token: process.env.VERCEL_KV_TOKEN
+            });
+            
+            await kv.set(STORAGE_CONFIG.storageKey, JSON.stringify(dataToStore));
+            STORAGE_CONFIG.lastStorageTime = now;
+            console.log(`Saved ${transactionsToStore.length} transactions to Vercel KV storage`);
+            return true;
+          } catch (kvError) {
+            console.error('Error saving to Vercel KV:', kvError);
+            return false;
+          }
+        } else {
+          console.log('Vercel KV storage not enabled, skipping save');
+          return false;
+        }
+      } else {
+        // For local development, save to file
+        try {
+          await fs.writeFile(
+            STORAGE_CONFIG.localFilePath, 
+            JSON.stringify(dataToStore, null, 2), 
+            'utf8'
+          );
+          STORAGE_CONFIG.lastStorageTime = now;
+          console.log(`Saved ${transactionsToStore.length} transactions to local file storage`);
+          return true;
+        } catch (fileError) {
+          console.error('Error saving to file:', fileError);
+          return false;
+        }
+      }
+    } catch (error) {
+      console.error('Error saving transactions:', error);
+      return false;
+    }
+  }
+};
+
 // Transaction class
 class Transaction {
   constructor(data) {
@@ -218,6 +395,11 @@ class Transaction {
         // Add new transaction
         transactions.push(this);
         console.log(`Saved new transaction: ${this.signature}`);
+        
+        // Try to persist to storage if we have enough new transactions
+        if (transactions.length % 5 === 0) {
+          storage.save().catch(err => console.error('Error auto-saving transactions:', err));
+        }
       }
       
       return this;
@@ -390,6 +572,14 @@ async function fetchTransactionsVercel(limit = 20) {
 async function fetchTransactions(limit = CONFIG.transactions.maxTransactionsToFetch) {
   // For Vercel, use the simplified direct fetch
   if (process.env.VERCEL) {
+    // Try to load from storage first
+    const loadedFromStorage = await storage.load();
+    if (loadedFromStorage && transactions.length > 0) {
+      console.log(`Using ${transactions.length} transactions from storage`);
+      return transactions;
+    }
+    
+    // If no stored data, fetch fresh data
     return fetchTransactionsVercel(limit);
   }
   
@@ -777,8 +967,25 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
   try {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
-      // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(20);
+      // Try to load from storage first
+      let fetchedTransactions = [];
+      const loadedFromStorage = await storage.load();
+      
+      if (loadedFromStorage && transactions.length > 0) {
+        console.log(`Using ${transactions.length} transactions from storage`);
+        fetchedTransactions = transactions;
+      } else {
+        // If no stored data, fetch fresh data
+        fetchedTransactions = await fetchTransactionsVercel(20);
+        
+        // Save the fetched transactions to storage
+        if (fetchedTransactions.length > 0) {
+          transactions.length = 0;
+          transactions.push(...fetchedTransactions);
+          lastFetchTimestamp = new Date().toISOString();
+          await storage.save();
+        }
+      }
       
       // Calculate basic statistics
       const stats = {
@@ -1385,9 +1592,14 @@ app.use((err, req, res, next) => {
 // For local development
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`Server running on port ${PORT}`);
+    // Initialize storage
+    await storage.init();
   });
+} else {
+  // For production, initialize storage when the module is loaded
+  storage.init().catch(err => console.error('Error initializing storage:', err));
 }
 
 // Export for Vercel serverless deployment
