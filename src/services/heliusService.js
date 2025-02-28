@@ -74,7 +74,13 @@ async function fetchTransactions() {
     };
     
     // Make request to Helius API
-    const response = await axios.post(HELIUS_RPC_URL, requestData);
+    const response = await axios.post(HELIUS_RPC_URL, requestData, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': HELIUS_API_KEY
+      },
+      timeout: 10000 // 10 second timeout
+    });
     
     // Check if response is valid
     if (!response.data || !response.data.result) {
@@ -136,7 +142,13 @@ async function getTransactionDetails(signature) {
     };
     
     // Make request to Helius API
-    const response = await axios.post(HELIUS_RPC_URL, requestData);
+    const response = await axios.post(HELIUS_RPC_URL, requestData, {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': HELIUS_API_KEY
+      },
+      timeout: 10000 // 10 second timeout
+    });
     
     // Check if response is valid
     if (!response.data || !response.data.result) {
