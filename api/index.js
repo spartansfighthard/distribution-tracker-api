@@ -16,7 +16,7 @@ const STORAGE_CONFIG = {
   vercelBlobEnabled: true, // Always enable Blob storage
   storageKey: 'transactions_data',
   blobStoragePath: 'transactions/data.json',
-  maxStoredTransactions: 1000, // Increased from 100 to 1000
+  maxStoredTransactions: 10000, // Increased from 100 to 1000
   storageInterval: 10 * 1000, // How often to save data (10 seconds)
   lastStorageTime: null
 };
