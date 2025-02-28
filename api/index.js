@@ -1004,8 +1004,49 @@ app.get('/api/health', (req, res) => {
     message: 'API is running',
     version: process.env.npm_package_version || '1.0.0',
     environment: process.env.NODE_ENV || 'development',
-    vercel: process.env.VERCEL ? true : false
+    vercel: process.env.VERCEL ? true : false,
+    storage: {
+      vercelKVEnabled: STORAGE_CONFIG.vercelKVEnabled,
+      vercelBlobEnabled: STORAGE_CONFIG.vercelBlobEnabled,
+      blobStoragePath: STORAGE_CONFIG.blobStoragePath
+    }
   });
+});
+
+// Add a diagnostic endpoint for Blob Storage
+app.get('/api/storage-check', async (req, res) => {
+  try {
+    const storageStatus = {
+      timestamp: new Date().toISOString(),
+      vercelBlobEnabled: STORAGE_CONFIG.vercelBlobEnabled,
+      blobStoragePath: STORAGE_CONFIG.blobStoragePath,
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false
+    };
+    
+    // If Blob Storage is enabled, try to access it
+    if (STORAGE_CONFIG.vercelBlobEnabled) {
+      try {
+        const { list } = await import('@vercel/blob');
+        const blobs = await list();
+        storageStatus.blobList = blobs;
+        storageStatus.message = 'Blob Storage is properly configured';
+      } catch (error) {
+        storageStatus.error = error.message;
+        storageStatus.message = 'Error accessing Blob Storage';
+      }
+    } else {
+      storageStatus.message = 'Blob Storage is not enabled';
+    }
+    
+    res.status(200).json(storageStatus);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error checking storage',
+      error: error.message
+    });
+  }
 });
 
 // Help endpoint
