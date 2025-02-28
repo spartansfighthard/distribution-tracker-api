@@ -5,7 +5,8 @@
   "main": "api/index.js",
   "scripts": {
     "start": "node api/index.js",
-    "dev": "nodemon api/index.js"
+    "dev": "nodemon api/index.js",
+    "vercel-build": "echo 'Building for Vercel deployment'"
   },
   "dependencies": {
     "@solana/web3.js": "^1.78.0",

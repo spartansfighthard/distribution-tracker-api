@@ -73,11 +73,34 @@ app.get('/api/health', (req, res) => {
 // Use routes from src/routes/index.js
 app.use('/api', routes);
 
-// Initialize Telegram bot only if token is provided and not in Vercel environment
-// This prevents the API from crashing if the Telegram bot module is not available
-if (process.env.TELEGRAM_BOT_TOKEN && process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+// Initialize Telegram bot (only in local environment)
+if (process.env.TELEGRAM_BOT_TOKEN && !process.env.VERCEL) {
   try {
-    const telegramBot = require('../src/bot/telegramBot');
+    // Only require the Telegram bot module if we're not in Vercel
+    const TelegramBot = require('node-telegram-bot-api');
+    const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+    
+    // Define bot commands
+    bot.onText(/\/start/, (msg) => {
+      const chatId = msg.chat.id;
+      bot.sendMessage(chatId, 'Welcome to the SOL Distribution Tracker Bot!');
+    });
+    
+    bot.onText(/\/help/, (msg) => {
+      const chatId = msg.chat.id;
+      bot.sendMessage(chatId, 'Available commands:\n/start - Start the bot\n/help - Show this help message\n/stats - Show distribution statistics');
+    });
+    
+    bot.onText(/\/stats/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        bot.sendMessage(chatId, 'Fetching statistics...');
+        // You can implement actual stats fetching here
+      } catch (error) {
+        bot.sendMessage(chatId, `Error fetching statistics: ${error.message}`);
+      }
+    });
+    
     console.log('Telegram bot initialized successfully');
   } catch (error) {
     console.warn('Failed to initialize Telegram bot:', error.message);
