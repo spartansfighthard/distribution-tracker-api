@@ -3,11 +3,22 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const transactionService = require('../src/services/transactionService');
-const telegramBot = require('../src/bot/telegramBot');
+const routes = require('../src/routes');
 
 // Create Express app
 const app = express();
+
+// Log environment variables for debugging (without exposing sensitive values)
+console.log(`
+API Environment:
+- NODE_ENV: ${process.env.NODE_ENV || 'not set'}
+- VERCEL: ${process.env.VERCEL ? 'true' : 'false'}
+- DISTRIBUTION_WALLET_ADDRESS: ${process.env.DISTRIBUTION_WALLET_ADDRESS ? '✓ Set' : '✗ Not set'}
+- HELIUS_API_KEY: ${process.env.HELIUS_API_KEY ? '✓ Set' : '✗ Not set'}
+- HELIUS_RPC_URL: ${process.env.HELIUS_RPC_URL ? '✓ Set' : '✗ Not set'}
+- TAX_TOKEN_MINT_ADDRESS: ${process.env.TAX_TOKEN_MINT_ADDRESS ? '✓ Set' : '✗ Not set'}
+- TELEGRAM_BOT_TOKEN: ${process.env.TELEGRAM_BOT_TOKEN ? '✓ Set' : '✗ Not set'}
+`);
 
 // Middleware
 app.use(cors({
@@ -17,17 +28,76 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Format response data for API
-const formatApiResponse = (data) => {
-  return {
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  next();
+});
+
+// Root route handler
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'SOL Distribution Tracker API is running',
+    version: process.env.npm_package_version || '1.0.0',
+    endpoints: [
+      '/api/health',
+      '/api/stats',
+      '/api/stats/tax-token',
+      '/api/stats/token/:tokenMint',
+      '/api/stats/sol',
+      '/api/transactions',
+      '/api/transactions/tax-token',
+      '/api/transactions/token/:tokenMint',
+      '/api/transactions/sol',
+      '/api/transactions/collected',
+      '/api/transactions/distributed',
+      '/api/transactions/swaps',
+      '/api/fetch-transactions'
+    ]
+  });
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
     success: true,
     timestamp: new Date().toISOString(),
-    data
-  };
-};
+    message: 'API is running',
+    version: process.env.npm_package_version || '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    vercel: process.env.VERCEL ? true : false
+  });
+});
+
+// Use routes from src/routes/index.js
+app.use('/api', routes);
+
+// Initialize Telegram bot only if token is provided and not in Vercel environment
+// This prevents the API from crashing if the Telegram bot module is not available
+if (process.env.TELEGRAM_BOT_TOKEN && process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  try {
+    const telegramBot = require('../src/bot/telegramBot');
+    console.log('Telegram bot initialized successfully');
+  } catch (error) {
+    console.warn('Failed to initialize Telegram bot:', error.message);
+  }
+}
+
+// 404 handler
+app.use((req, res, next) => {
+  res.status(404).json({
+    success: false,
+    timestamp: new Date().toISOString(),
+    error: {
+      message: `Route not found: ${req.method} ${req.url}`,
+      code: 404
+    }
+  });
+});
 
 // Error handler middleware
-const errorHandler = (err, req, res, next) => {
+app.use((err, req, res, next) => {
   console.error('API Error:', err);
   res.status(500).json({
     success: false,
@@ -37,140 +107,15 @@ const errorHandler = (err, req, res, next) => {
       code: err.code || 500
     }
   });
-};
+});
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    message: 'API is running',
-    version: process.env.npm_package_version || '1.0.0'
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
   });
-});
+}
 
-// Get wallet stats
-app.get('/api/stats', async (req, res, next) => {
-  try {
-    const walletAddress = req.query.wallet || process.env.DISTRIBUTION_WALLET_ADDRESS;
-    const stats = await transactionService.getWalletStats(walletAddress);
-    
-    // Format numbers for API response
-    const formattedStats = {
-      ...stats,
-      totalSolSent: parseFloat(stats.totalSolSent.toFixed(9)),
-      totalSolReceived: parseFloat(stats.totalSolReceived.toFixed(9)),
-      totalTaxReceived: parseFloat(stats.totalTaxReceived.toFixed(9)),
-      currentBalance: parseFloat(stats.currentBalance.toFixed(9)),
-      outgoingTransactions: stats.outgoingTransactions.map(tx => ({
-        ...tx,
-        solAmount: parseFloat(tx.solAmount.toFixed(9)),
-        timestamp: tx.timestamp.toISOString(),
-        date: new Date(tx.timestamp).toLocaleString('en-US', {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        })
-      })),
-      taxIncomingTransactions: stats.taxIncomingTransactions.map(tx => ({
-        ...tx,
-        solAmount: parseFloat(tx.solAmount.toFixed(9)),
-        timestamp: tx.timestamp.toISOString(),
-        date: new Date(tx.timestamp).toLocaleString('en-US', {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        })
-      }))
-    };
-    
-    res.json(formatApiResponse(formattedStats));
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Get distribution transactions
-app.get('/api/distributions', async (req, res, next) => {
-  try {
-    const walletAddress = req.query.wallet || process.env.DISTRIBUTION_WALLET_ADDRESS;
-    const distributionData = await transactionService.getDistributionTransactions(walletAddress);
-    
-    // Format numbers for API response
-    const formattedData = {
-      ...distributionData,
-      totalSolSent: parseFloat(distributionData.totalSolSent.toFixed(9)),
-      transactions: distributionData.transactions.map(tx => ({
-        ...tx,
-        solAmount: parseFloat(tx.solAmount.toFixed(9)),
-        timestamp: tx.timestamp.toISOString(),
-        date: new Date(tx.timestamp).toLocaleString('en-US', {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        })
-      }))
-    };
-    
-    res.json(formatApiResponse(formattedData));
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Get tax transactions
-app.get('/api/tax', async (req, res, next) => {
-  try {
-    const walletAddress = req.query.wallet || process.env.DISTRIBUTION_WALLET_ADDRESS;
-    const taxData = await transactionService.getTaxTransactions(walletAddress);
-    
-    // Format numbers for API response
-    const formattedData = {
-      ...taxData,
-      totalTaxReceived: parseFloat(taxData.totalTaxReceived.toFixed(9)),
-      transactions: taxData.transactions.map(tx => ({
-        ...tx,
-        solAmount: parseFloat(tx.solAmount.toFixed(9)),
-        timestamp: tx.timestamp.toISOString(),
-        date: new Date(tx.timestamp).toLocaleString('en-US', {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        })
-      }))
-    };
-    
-    res.json(formatApiResponse(formattedData));
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Force refresh historical data
-app.post('/api/refresh', async (req, res, next) => {
-  try {
-    const walletAddress = req.body.wallet || process.env.DISTRIBUTION_WALLET_ADDRESS;
-    await transactionService.refreshHistoricalData(walletAddress);
-    
-    res.json(formatApiResponse({
-      message: 'Historical data refreshed successfully',
-      timestamp: new Date().toISOString()
-    }));
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Apply error handler
-app.use(errorHandler);
-
-// Export the Express API for Vercel
+// Export for Vercel serverless deployment
 module.exports = app; 
