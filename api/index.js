@@ -229,7 +229,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 3) {
+async function fetchTransactionsVercel(limit = 10) {
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -264,17 +264,120 @@ async function fetchTransactionsVercel(limit = 3) {
     const signatures = response.data.result;
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
-    // For Vercel, we'll just return the basic signature data without fetching details
-    return signatures.map(sig => ({
-      signature: sig.signature,
-      slot: sig.slot,
-      blockTime: sig.blockTime,
-      timestamp: new Date(sig.blockTime * 1000).toISOString(),
-      // Add placeholder values for required fields
-      type: 'unknown',
-      amount: 0,
-      token: 'SOL'
-    }));
+    // For Vercel, we'll fetch transaction details for a limited number of transactions
+    const maxToProcess = Math.min(signatures.length, 10);
+    const processedTransactions = [];
+    
+    // Start time tracking
+    const startTime = Date.now();
+    const timeLimit = 10000; // 10 seconds max processing time
+    
+    // Process signatures one by one
+    for (let i = 0; i < maxToProcess; i++) {
+      // Check if we're approaching the time limit
+      if (Date.now() - startTime > timeLimit) {
+        console.log(`[Vercel] Approaching time limit, stopping after processing ${i} transactions`);
+        break;
+      }
+      
+      const sig = signatures[i];
+      try {
+        // Prepare request for transaction details
+        const txRequestData = {
+          jsonrpc: '2.0',
+          id: 'tx-details',
+          method: 'getTransaction',
+          params: [
+            sig.signature,
+            {
+              encoding: 'jsonParsed',
+              maxSupportedTransactionVersion: 0
+            }
+          ]
+        };
+        
+        // Make direct request without rate limiting
+        const txResponse = await axios.post(HELIUS_RPC_URL, txRequestData);
+        
+        if (!txResponse.data || !txResponse.data.result) {
+          console.log(`[Vercel] Invalid response for transaction ${sig.signature}`);
+          continue;
+        }
+        
+        const txData = txResponse.data.result;
+        
+        // Basic transaction data
+        const transaction = {
+          signature: sig.signature,
+          blockTime: txData.blockTime || sig.blockTime,
+          slot: txData.slot || sig.slot,
+          timestamp: new Date((txData.blockTime || sig.blockTime) * 1000).toISOString(),
+          type: 'unknown',
+          amount: 0,
+          token: 'SOL'
+        };
+        
+        // Try to determine transaction type and details
+        if (txData && txData.meta && !txData.meta.err) {
+          const preBalances = txData.meta.preBalances;
+          const postBalances = txData.meta.postBalances;
+          const accountKeys = txData.transaction.message.accountKeys;
+          
+          if (preBalances && postBalances && accountKeys) {
+            // Find index of distribution wallet
+            const walletIndex = accountKeys.findIndex(key => 
+              key.pubkey === DISTRIBUTION_WALLET_ADDRESS
+            );
+            
+            if (walletIndex >= 0) {
+              const preBal = preBalances[walletIndex];
+              const postBal = postBalances[walletIndex];
+              const diff = postBal - preBal;
+              
+              if (diff > 0) {
+                // Received SOL
+                transaction.type = 'received';
+                transaction.amount = diff / 1e9; // Convert lamports to SOL
+                transaction.token = 'SOL';
+                transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
+                
+                // Try to determine sender
+                const senderIndex = preBalances.findIndex((bal, i) => 
+                  i !== walletIndex && preBalances[i] > postBalances[i]
+                );
+                if (senderIndex >= 0) {
+                  transaction.sender = accountKeys[senderIndex].pubkey;
+                }
+              } else if (diff < 0) {
+                // Sent SOL
+                transaction.type = 'sent';
+                transaction.amount = Math.abs(diff) / 1e9; // Convert lamports to SOL
+                transaction.token = 'SOL';
+                transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
+                
+                // Try to determine receiver
+                const receiverIndex = preBalances.findIndex((bal, i) => 
+                  i !== walletIndex && preBalances[i] < postBalances[i]
+                );
+                if (receiverIndex >= 0) {
+                  transaction.receiver = accountKeys[receiverIndex].pubkey;
+                }
+              }
+            }
+          }
+        }
+        
+        processedTransactions.push(transaction);
+        
+      } catch (error) {
+        console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
+        // Continue with next signature
+        continue;
+      }
+    }
+    
+    console.log(`[Vercel] Successfully processed ${processedTransactions.length} transactions in ${Date.now() - startTime}ms`);
+    return processedTransactions;
   } catch (error) {
     console.error('[Vercel] Error fetching transactions:', error.message);
     return [];
@@ -673,7 +776,29 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
       // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(3);
+      const fetchedTransactions = await fetchTransactionsVercel(10);
+      
+      // Calculate basic statistics
+      const stats = {
+        totalTransactions: fetchedTransactions.length,
+        transactionsByType: {},
+        transactionsByToken: {},
+        totalAmountByToken: {}
+      };
+      
+      // Process each transaction
+      for (const tx of fetchedTransactions) {
+        // Count by type
+        stats.transactionsByType[tx.type] = (stats.transactionsByType[tx.type] || 0) + 1;
+        
+        // Count by token
+        stats.transactionsByToken[tx.token] = (stats.transactionsByToken[tx.token] || 0) + 1;
+        
+        // Sum amount by token
+        if (tx.amount) {
+          stats.totalAmountByToken[tx.token] = (stats.totalAmountByToken[tx.token] || 0) + tx.amount;
+        }
+      }
       
       // Return simplified statistics
       return res.json({
@@ -681,11 +806,10 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
         vercel: true,
-        note: "Running in simplified mode due to Vercel serverless constraints",
+        note: "Running in optimized mode for Vercel serverless environment",
         stats: {
-          totalTransactions: fetchedTransactions.length,
-          recentTransactions: fetchedTransactions.slice(0, 3),
-          note: "Limited data available in Vercel environment to prevent timeouts"
+          ...stats,
+          recentTransactions: fetchedTransactions
         }
       });
     }
@@ -740,7 +864,26 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(3);
+    const fetchedTransactions = await fetchTransactionsVercel(10);
+    
+    // Get transactions with type 'sent'
+    const sentTransactions = fetchedTransactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
+    
+    // Calculate distribution statistics
+    const stats = {
+      totalTransactions: sentTransactions.length,
+      totalDistributed: sentTransactions.reduce((sum, tx) => sum + tx.amount, 0),
+      averageDistribution: sentTransactions.length > 0 
+        ? sentTransactions.reduce((sum, tx) => sum + tx.amount, 0) / sentTransactions.length 
+        : 0,
+      largestDistribution: sentTransactions.length > 0 
+        ? Math.max(...sentTransactions.map(tx => tx.amount)) 
+        : 0,
+      smallestDistribution: sentTransactions.length > 0 
+        ? Math.min(...sentTransactions.map(tx => tx.amount)) 
+        : 0,
+      recentDistributions: sentTransactions.slice(0, 5)
+    };
     
     // Return simplified statistics
     return res.json({
@@ -748,12 +891,8 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
       timestamp: new Date().toISOString(),
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
-      note: "Running in simplified mode due to Vercel serverless constraints",
-      stats: {
-        totalTransactions: fetchedTransactions.length,
-        recentTransactions: fetchedTransactions.slice(0, 3),
-        note: "Limited data available in Vercel environment to prevent timeouts"
-      }
+      note: "Running in optimized mode for Vercel serverless environment",
+      stats
     });
   }
   
@@ -806,20 +945,43 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(3);
+    const fetchedTransactions = await fetchTransactionsVercel(10);
     
-    // Return simplified statistics
+    // Get transactions for SOL
+    const solTransactions = fetchedTransactions.filter(tx => tx.token === 'SOL');
+    
+    // Calculate statistics
+    const received = solTransactions.filter(tx => tx.type === 'received');
+    const sent = solTransactions.filter(tx => tx.type === 'sent');
+    
+    const stats = {
+      totalTransactions: solTransactions.length,
+      received: {
+        count: received.length,
+        total: received.reduce((sum, tx) => sum + tx.amount, 0),
+        average: received.length > 0 
+          ? received.reduce((sum, tx) => sum + tx.amount, 0) / received.length 
+          : 0
+      },
+      sent: {
+        count: sent.length,
+        total: sent.reduce((sum, tx) => sum + tx.amount, 0),
+        average: sent.length > 0 
+          ? sent.reduce((sum, tx) => sum + tx.amount, 0) / sent.length 
+          : 0
+      },
+      balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0),
+      recentTransactions: solTransactions.slice(0, 5)
+    };
+    
+    // Return statistics
     return res.json({
       success: true,
       timestamp: new Date().toISOString(),
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
-      note: "Running in simplified mode due to Vercel serverless constraints",
-      stats: {
-        totalTransactions: fetchedTransactions.length,
-        recentTransactions: fetchedTransactions.slice(0, 3),
-        note: "Limited data available in Vercel environment to prevent timeouts"
-      }
+      note: "Running in optimized mode for Vercel serverless environment",
+      stats
     });
   }
   
@@ -881,7 +1043,7 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
       // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(3);
+      const fetchedTransactions = await fetchTransactionsVercel(10);
       
       // Return simplified response
       return res.json({
@@ -889,10 +1051,10 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
         vercel: true,
-        note: "Running in simplified mode due to Vercel serverless constraints",
-        message: 'Fetched basic transaction data',
+        note: "Running in optimized mode for Vercel serverless environment",
+        message: 'Fetched transaction data with details',
         count: fetchedTransactions.length,
-        recentTransactions: fetchedTransactions.slice(0, 3)
+        recentTransactions: fetchedTransactions
       });
     }
     
