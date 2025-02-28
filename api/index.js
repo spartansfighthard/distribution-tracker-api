@@ -1076,27 +1076,24 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         }
       }
       
-      // Calculate basic statistics
-      const stats = {
-        totalTransactions: fetchedTransactions.length,
-        transactionsByType: {},
-        transactionsByToken: {},
-        totalAmountByToken: {}
-      };
+      // Get transactions with type 'sent' from ALL stored transactions
+      const sentTransactions = transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
       
-      // Process each transaction
-      for (const tx of fetchedTransactions) {
-        // Count by type
-        stats.transactionsByType[tx.type] = (stats.transactionsByType[tx.type] || 0) + 1;
-        
-        // Count by token
-        stats.transactionsByToken[tx.token] = (stats.transactionsByToken[tx.token] || 0) + 1;
-        
-        // Sum amount by token
-        if (tx.amount) {
-          stats.totalAmountByToken[tx.token] = (stats.totalAmountByToken[tx.token] || 0) + tx.amount;
-        }
-      }
+      // Calculate distribution statistics
+      const stats = {
+        totalTransactions: sentTransactions.length,
+        totalDistributed: sentTransactions.reduce((sum, tx) => sum + tx.amount, 0),
+        averageDistribution: sentTransactions.length > 0 
+          ? sentTransactions.reduce((sum, tx) => sum + tx.amount, 0) / sentTransactions.length 
+          : 0,
+        largestDistribution: sentTransactions.length > 0 
+          ? Math.max(...sentTransactions.map(tx => tx.amount)) 
+          : 0,
+        smallestDistribution: sentTransactions.length > 0 
+          ? Math.min(...sentTransactions.map(tx => tx.amount)) 
+          : 0,
+        recentDistributions: sentTransactions.slice(0, 5)
+      };
       
       // Return simplified statistics
       return res.json({
@@ -1110,9 +1107,9 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
           totalStoredTransactions: transactions.length,
           displayedTransactions: fetchedTransactions.length,
           recentTransactions: fetchedTransactions.slice(0, 10),
-          allTransactions: transactions,
-          fetchedAt: new Date().toISOString()
-        }
+          allTransactions: transactions.filter(tx => tx.token === 'SOL')
+        },
+        fetchedAt: new Date().toISOString()
       });
     }
     
@@ -1165,11 +1162,28 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
   
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
-    // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(20);
+    // Try to load from storage first
+    let fetchedTransactions = [];
+    const loadedFromStorage = await storage.load();
     
-    // Get transactions with type 'sent'
-    const sentTransactions = fetchedTransactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
+    if (loadedFromStorage && transactions.length > 0) {
+      console.log(`Using ${transactions.length} transactions from storage`);
+      fetchedTransactions = transactions;
+    } else {
+      // If no stored data, fetch fresh data
+      fetchedTransactions = await fetchTransactionsVercel(20);
+      
+      // Save the fetched transactions to storage
+      if (fetchedTransactions.length > 0) {
+        transactions.length = 0;
+        transactions.push(...fetchedTransactions);
+        lastFetchTimestamp = new Date().toISOString();
+        await storage.save();
+      }
+    }
+    
+    // Get transactions with type 'sent' from ALL stored transactions
+    const sentTransactions = transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
     
     // Calculate distribution statistics
     const stats = {
@@ -1197,7 +1211,7 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
       stats: {
         ...stats,
         totalStoredTransactions: transactions.length,
-        displayedTransactions: sentTransactions.length,
+        displayedTransactions: fetchedTransactions.length,
         recentDistributions: sentTransactions.slice(0, 10),
         allDistributions: transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL')
       },
@@ -1253,11 +1267,28 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
   
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
-    // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(20);
+    // Try to load from storage first
+    let fetchedTransactions = [];
+    const loadedFromStorage = await storage.load();
     
-    // Get transactions for SOL
-    const solTransactions = fetchedTransactions.filter(tx => tx.token === 'SOL');
+    if (loadedFromStorage && transactions.length > 0) {
+      console.log(`Using ${transactions.length} transactions from storage`);
+      fetchedTransactions = transactions;
+    } else {
+      // If no stored data, fetch fresh data
+      fetchedTransactions = await fetchTransactionsVercel(20);
+      
+      // Save the fetched transactions to storage
+      if (fetchedTransactions.length > 0) {
+        transactions.length = 0;
+        transactions.push(...fetchedTransactions);
+        lastFetchTimestamp = new Date().toISOString();
+        await storage.save();
+      }
+    }
+    
+    // Get transactions for SOL from ALL stored transactions
+    const solTransactions = transactions.filter(tx => tx.token === 'SOL');
     
     // Calculate statistics
     const received = solTransactions.filter(tx => tx.type === 'received');
@@ -1290,8 +1321,13 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
       note: "Running in optimized mode for Vercel serverless environment",
-      serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
-      stats,
+      stats: {
+        ...stats,
+        totalStoredTransactions: transactions.length,
+        displayedTransactions: solTransactions.length,
+        recentTransactions: solTransactions.slice(0, 10),
+        allTransactions: transactions.filter(tx => tx.token === 'SOL')
+      },
       fetchedAt: new Date().toISOString()
     });
   }
@@ -1341,8 +1377,16 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
     success: true,
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    vercel: false,
-    stats
+    vercel: true,
+    note: "Running in optimized mode for Vercel serverless environment",
+    stats: {
+      ...stats,
+      totalStoredTransactions: transactions.length,
+      displayedTransactions: solTransactions.length,
+      recentTransactions: solTransactions.slice(0, 10),
+      allTransactions: transactions.filter(tx => tx.token === 'SOL')
+    },
+    fetchedAt: new Date().toISOString()
   });
 }));
 
@@ -1353,8 +1397,25 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
   try {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
-      // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(20);
+      // Try to load from storage first
+      let fetchedTransactions = [];
+      const loadedFromStorage = await storage.load();
+      
+      if (loadedFromStorage && transactions.length > 0) {
+        console.log(`Using ${transactions.length} transactions from storage`);
+        fetchedTransactions = transactions;
+      } else {
+        // If no stored data, fetch fresh data
+        fetchedTransactions = await fetchTransactionsVercel(20);
+        
+        // Save the fetched transactions to storage
+        if (fetchedTransactions.length > 0) {
+          transactions.length = 0;
+          transactions.push(...fetchedTransactions);
+          lastFetchTimestamp = new Date().toISOString();
+          await storage.save();
+        }
+      }
       
       // Return simplified response
       return res.json({
@@ -1363,10 +1424,11 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
         environment: process.env.NODE_ENV || 'development',
         vercel: true,
         note: "Running in optimized mode for Vercel serverless environment",
-        serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
         message: 'Fetched transaction data with details',
         count: fetchedTransactions.length,
-        recentTransactions: fetchedTransactions,
+        totalStoredTransactions: transactions.length,
+        recentTransactions: fetchedTransactions.slice(0, 10),
+        allTransactions: transactions,
         fetchedAt: new Date().toISOString()
       });
     }
