@@ -40,10 +40,12 @@ const CONFIG = {
   },
   // Vercel optimization
   vercel: {
-    maxProcessingTime: 5000,     // Reduced from 10s to 5s to be more conservative
+    maxProcessingTime: 4000,     // Reduced from 5s to 4s to be even more conservative
     maxTransactionsPerServerlessRequest: 1, // Reduced from 2 to 1
     skipRateLimiting: true,      // Skip rate limiting in Vercel environment
-    skipDetailedProcessing: true // Skip detailed transaction processing in Vercel
+    skipDetailedProcessing: true, // Skip detailed transaction processing in Vercel
+    incrementalFetching: true,   // Enable incremental fetching to avoid timeouts
+    maxSignaturesPerBatch: 5     // Process at most 5 signatures per batch
   }
 };
 
@@ -361,6 +363,19 @@ const storage = {
         // Always use Blob storage in Vercel
         try {
           console.log(`Attempting to save ${transactionsToStore.length} transactions to Vercel Blob storage...`);
+          
+          // Check if we're in a serverless function with time constraints
+          const isServerlessFunction = process.env.VERCEL;
+          const startTime = isServerlessFunction ? Date.now() : 0;
+          const timeLimit = isServerlessFunction ? 8000 : Infinity; // 8 seconds max for saving in serverless
+          
+          // If we're approaching the time limit, save a smaller batch
+          if (isServerlessFunction && transactionsToStore.length > 100 && (now - startTime) > timeLimit / 2) {
+            console.log(`Approaching time limit, saving only the most recent 100 transactions instead of ${transactionsToStore.length}`);
+            dataToStore.transactions = transactionsToStore.slice(0, 100);
+            console.log(`Reduced transaction count to ${dataToStore.transactions.length} for saving`);
+          }
+          
           const { put } = await import('@vercel/blob');
           
           // Convert data to JSON string
@@ -375,7 +390,7 @@ const storage = {
           });
           
           STORAGE_CONFIG.lastStorageTime = now;
-          console.log(`Saved ${transactionsToStore.length} transactions to Vercel Blob storage at ${url}`);
+          console.log(`Saved ${dataToStore.transactions.length} transactions to Vercel Blob storage at ${url}`);
           return true;
         } catch (blobError) {
           console.error('Error saving to Vercel Blob:', blobError);
@@ -495,13 +510,13 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
     const signatures = response.data.result;
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
-    // For Vercel, we'll fetch transaction details for a larger number of transactions
-    const maxToProcess = Math.min(signatures.length, 100); // Increased from 50 to 100
+    // For Vercel, we'll fetch transaction details for a smaller number of transactions to avoid timeouts
+    const maxToProcess = Math.min(signatures.length, 20); // Reduced from 100 to 20 to avoid timeouts
     const processedTransactions = [];
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 12000; // 12 seconds max processing time
+    const timeLimit = 8000; // Reduced from 12s to 8s to be more conservative
     
     // Process signatures one by one
     for (let i = 0; i < maxToProcess; i++) {
@@ -548,7 +563,7 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
           token: 'SOL'
         };
         
-        // Try to determine transaction type and details
+        // Simplified transaction processing to avoid timeouts
         if (txData && txData.meta && !txData.meta.err) {
           const preBalances = txData.meta.preBalances;
           const postBalances = txData.meta.postBalances;
@@ -571,34 +586,19 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
                 transaction.amount = diff / 1e9; // Convert lamports to SOL
                 transaction.token = 'SOL';
                 transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
-                
-                // Try to determine sender
-                const senderIndex = preBalances.findIndex((bal, i) => 
-                  i !== walletIndex && preBalances[i] > postBalances[i]
-                );
-                if (senderIndex >= 0) {
-                  transaction.sender = accountKeys[senderIndex].pubkey;
-                }
               } else if (diff < 0) {
                 // Sent SOL
                 transaction.type = 'sent';
                 transaction.amount = Math.abs(diff) / 1e9; // Convert lamports to SOL
                 transaction.token = 'SOL';
                 transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
-                
-                // Try to determine receiver
-                const receiverIndex = preBalances.findIndex((bal, i) => 
-                  i !== walletIndex && preBalances[i] < postBalances[i]
-                );
-                if (receiverIndex >= 0) {
-                  transaction.receiver = accountKeys[receiverIndex].pubkey;
-                }
               }
             }
           }
         }
         
         processedTransactions.push(transaction);
+        console.log(`[Vercel] Successfully processed transaction: ${sig.signature}`);
         
       } catch (error) {
         console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
@@ -631,11 +631,17 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
         console.log('[Vercel] Saving all transactions to Blob storage...');
         await storage.save();
         
-        // After saving initial transactions, trigger historical fetch to get more
-        console.log('[Vercel] Triggering historical transaction fetch to get more data...');
-        fetchAllHistoricalTransactions().catch(err => 
-          console.error('Error fetching historical transactions after initial fetch:', err)
-        );
+        // After saving initial transactions, trigger historical fetch to get more in the background
+        // But only if we have fewer than 100 transactions to avoid unnecessary processing
+        if (transactions.length < 100) {
+          console.log('[Vercel] Triggering historical transaction fetch to get more data...');
+          // Use setTimeout to run this asynchronously after the current request completes
+          nodeSetTimeout(() => {
+            fetchAllHistoricalTransactions().catch(err => 
+              console.error('Error fetching historical transactions after initial fetch:', err)
+            );
+          }, 100);
+        }
       } else {
         console.log('[Vercel] No new unique transactions to add');
       }
@@ -1546,6 +1552,94 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
   }
 }));
 
+// Add GET endpoint for /api/refresh to handle browser requests
+app.get('/api/refresh', asyncHandler(async (req, res) => {
+  console.log('GET: Refreshing historical transaction data...');
+  
+  try {
+    // For Vercel, use a simplified approach
+    if (process.env.VERCEL) {
+      // Try to load from storage first
+      let fetchedTransactions = [];
+      const loadedFromStorage = await storage.load();
+      
+      if (loadedFromStorage && transactions.length > 0) {
+        console.log(`Using ${transactions.length} transactions from storage`);
+        fetchedTransactions = transactions;
+      } else {
+        // If no stored data, fetch fresh data
+        fetchedTransactions = await fetchTransactionsVercel(20);
+        
+        // Save the fetched transactions to storage
+        if (fetchedTransactions.length > 0) {
+          transactions.length = 0;
+          transactions.push(...fetchedTransactions);
+          lastFetchTimestamp = new Date().toISOString();
+          await storage.save();
+        }
+      }
+      
+      // Return simplified response
+      return res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+        vercel: true,
+        note: "Running in optimized mode for Vercel serverless environment",
+        message: 'Fetched transaction data with details',
+        count: fetchedTransactions.length,
+        totalStoredTransactions: transactions.length,
+        recentTransactions: fetchedTransactions.slice(0, 10),
+        allTransactions: transactions,
+        fetchedAt: new Date().toISOString()
+      });
+    }
+    
+    // For non-Vercel environments, use the full implementation
+    // Check if we've fetched recently to avoid rate limits
+    const lastFetchTime = lastFetchTimestamp ? new Date(lastFetchTimestamp) : null;
+    const timeSinceLastFetch = lastFetchTime ? (new Date() - lastFetchTime) : Infinity;
+    
+    if (timeSinceLastFetch < 60000) { // 1 minute
+      console.log(`Last fetch was ${Math.round(timeSinceLastFetch / 1000)} seconds ago. Skipping to avoid rate limits.`);
+      
+      return res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        message: 'Skipped refresh to avoid rate limits',
+        lastFetch: lastFetchTimestamp,
+        waitTime: 60000 - timeSinceLastFetch,
+        totalTransactions: transactions.length,
+        recentTransactions: transactions.slice(0, 3)
+      });
+    }
+    
+    // Fetch transactions
+    const newTransactions = await fetchTransactions();
+    
+    // Return transactions
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: false,
+      message: 'Historical transaction data refreshed successfully',
+      count: newTransactions.length,
+      totalTransactions: transactions.length,
+      recentTransactions: transactions.slice(0, 3)
+    });
+  } catch (error) {
+    console.error('Error in GET /api/refresh:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to refresh transaction data',
+        details: error.message
+      }
+    });
+  }
+}));
+
 // Add a sample transaction (for testing)
 app.get('/api/add-sample', async (req, res) => {
   try {
@@ -1811,11 +1905,11 @@ async function fetchAllHistoricalTransactions() {
     let beforeSignature = null;
     const batchSize = 50; // Increased from 20 to 50
     let batchCount = 0;
-    const maxBatches = 20; // Increased from 10 to 20 batches (1000 transactions) per run
+    const maxBatches = 2; // Reduced from 20 to 2 batches per run to avoid timeouts
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 13000; // Increased from 12 to 13 seconds max processing time
+    const timeLimit = 10000; // Reduced from 13s to 10s to be more conservative
     
     while (hasMore && batchCount < maxBatches) {
       // Check if we're approaching the time limit
@@ -1878,19 +1972,26 @@ async function fetchAllHistoricalTransactions() {
         continue;
       }
       
-      // Process new signatures
+      // Process new signatures - OPTIMIZED VERSION
+      // Instead of processing all signatures, just process a small batch to avoid timeouts
+      const maxSignaturesToProcess = Math.min(newSignatures.length, 5); // Process at most 5 signatures per run
       const batchProcessedTransactions = [];
       const batchStartTime = Date.now();
       
-      for (let i = 0; i < newSignatures.length; i++) {
+      console.log(`[Vercel] Processing ${maxSignaturesToProcess} out of ${newSignatures.length} signatures to avoid timeouts`);
+      
+      for (let i = 0; i < maxSignaturesToProcess; i++) {
         // Check if we're approaching the time limit
-        if (Date.now() - startTime > timeLimit) {
+        if (Date.now() - startTime > timeLimit - 2000) { // Leave 2 seconds for cleanup
           console.log(`[Vercel] Approaching overall time limit, stopping signature processing`);
           break;
         }
         
         const sig = newSignatures[i];
         try {
+          // Add to existing signatures set to avoid reprocessing in future runs
+          existingSignatures.add(sig.signature);
+          
           // Prepare request for transaction details
           const txRequestData = {
             jsonrpc: '2.0',
@@ -1926,7 +2027,7 @@ async function fetchAllHistoricalTransactions() {
             token: 'SOL'
           };
           
-          // Try to determine transaction type and details
+          // Simplified transaction processing to avoid timeouts
           if (txData && txData.meta && !txData.meta.err) {
             const preBalances = txData.meta.preBalances;
             const postBalances = txData.meta.postBalances;
@@ -1949,35 +2050,19 @@ async function fetchAllHistoricalTransactions() {
                   transaction.amount = diff / 1e9; // Convert lamports to SOL
                   transaction.token = 'SOL';
                   transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
-                  
-                  // Try to determine sender
-                  const senderIndex = preBalances.findIndex((bal, i) => 
-                    i !== walletIndex && preBalances[i] > postBalances[i]
-                  );
-                  if (senderIndex >= 0) {
-                    transaction.sender = accountKeys[senderIndex].pubkey;
-                  }
                 } else if (diff < 0) {
                   // Sent SOL
                   transaction.type = 'sent';
                   transaction.amount = Math.abs(diff) / 1e9; // Convert lamports to SOL
                   transaction.token = 'SOL';
                   transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
-                  
-                  // Try to determine receiver
-                  const receiverIndex = preBalances.findIndex((bal, i) => 
-                    i !== walletIndex && preBalances[i] < postBalances[i]
-                  );
-                  if (receiverIndex >= 0) {
-                    transaction.receiver = accountKeys[receiverIndex].pubkey;
-                  }
                 }
               }
             }
           }
           
           batchProcessedTransactions.push(transaction);
-          existingSignatures.add(transaction.signature); // Add to our tracking set
+          console.log(`[Vercel] Successfully processed transaction: ${sig.signature}`);
           
         } catch (error) {
           console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
@@ -2001,6 +2086,13 @@ async function fetchAllHistoricalTransactions() {
         // Save to persistent storage
         console.log(`[Vercel] Saving batch ${batchCount} to Blob storage (${transactions.length} total transactions)...`);
         await storage.save();
+      }
+      
+      // If we've processed some signatures but there are more, we'll stop here
+      // and let the next function call handle the rest to avoid timeouts
+      if (batchProcessedTransactions.length > 0 && newSignatures.length > maxSignaturesToProcess) {
+        console.log(`[Vercel] Processed ${batchProcessedTransactions.length} signatures, but there are ${newSignatures.length - maxSignaturesToProcess} more. Stopping to avoid timeouts.`);
+        break;
       }
     }
     
@@ -2037,6 +2129,58 @@ app.get('/api/fetch-all', asyncHandler(async (req, res) => {
       success: false,
       error: {
         message: 'Failed to fetch all historical transactions',
+        details: error.message
+      }
+    });
+  }
+}));
+
+// Add a new endpoint to check transaction fetch status
+app.get('/api/fetch-status', asyncHandler(async (req, res) => {
+  console.log('Checking transaction fetch status...');
+  
+  try {
+    // Load transactions from storage to get the latest count
+    await storage.load();
+    
+    // Get transaction statistics
+    const solTransactions = transactions.filter(tx => tx.token === 'SOL');
+    const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
+    const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
+    
+    // Get the most recent transaction timestamp
+    const mostRecentTransaction = transactions.length > 0 
+      ? transactions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]
+      : null;
+    
+    // Return status
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      status: {
+        totalTransactions: transactions.length,
+        solTransactions: solTransactions.length,
+        sentTransactions: sentTransactions.length,
+        receivedTransactions: receivedTransactions.length,
+        lastFetchTimestamp: lastFetchTimestamp,
+        mostRecentTransactionTimestamp: mostRecentTransaction ? mostRecentTransaction.timestamp : null,
+        mostRecentTransactionSignature: mostRecentTransaction ? mostRecentTransaction.signature : null,
+        storageConfig: {
+          vercelKVEnabled: STORAGE_CONFIG.vercelKVEnabled,
+          vercelBlobEnabled: STORAGE_CONFIG.vercelBlobEnabled,
+          maxStoredTransactions: STORAGE_CONFIG.maxStoredTransactions
+        }
+      },
+      message: 'Transaction fetch status retrieved successfully'
+    });
+  } catch (error) {
+    console.error('Error in /api/fetch-status:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to get transaction fetch status',
         details: error.message
       }
     });
