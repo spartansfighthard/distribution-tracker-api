@@ -1,7 +1,9 @@
 // File storage service with in-memory fallback for Vercel
 const fs = require('fs').promises;
 const path = require('path');
-const { connectToDatabase } = require('../utils/mongodb');
+
+// In-memory storage for Vercel environment
+const memoryStorage = {};
 
 // Check if we're in Vercel environment
 const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true';
@@ -13,9 +15,17 @@ const DATA_DIR = isVercel ? null : path.join(process.cwd(), 'data');
 async function initialize() {
   try {
     if (isVercel) {
-      console.log('Running in Vercel environment, using MongoDB storage');
-      // Test MongoDB connection
-      await connectToDatabase();
+      console.log('Running in Vercel environment, using in-memory storage');
+      
+      // Try to load MongoDB if available, but don't fail if it's not
+      try {
+        const { connectToDatabase } = require('../utils/mongodb');
+        await connectToDatabase();
+        console.log('MongoDB connection successful');
+      } catch (error) {
+        console.warn('MongoDB connection failed, falling back to in-memory storage:', error.message);
+      }
+      
       return true;
     }
     
@@ -39,18 +49,29 @@ async function initialize() {
   }
 }
 
-// Read data from file or MongoDB
+// Read data from file or memory
 async function readData(filename) {
   try {
-    // Use MongoDB in Vercel
+    // Use in-memory storage in Vercel
     if (isVercel) {
-      console.log(`Reading data from MongoDB: ${filename}`);
+      console.log(`Reading data from memory: ${filename}`);
       
-      const { db } = await connectToDatabase();
-      const collection = db.collection('metadata');
+      // Try to use MongoDB if available
+      try {
+        const { connectToDatabase } = require('../utils/mongodb');
+        const { db } = await connectToDatabase();
+        const collection = db.collection('metadata');
+        
+        const doc = await collection.findOne({ key: filename });
+        if (doc) {
+          console.log(`Read data from MongoDB: ${filename}`);
+          return doc.value;
+        }
+      } catch (error) {
+        console.warn('MongoDB read failed, falling back to in-memory storage:', error.message);
+      }
       
-      const doc = await collection.findOne({ key: filename });
-      return doc ? doc.value : null;
+      return memoryStorage[filename] || null;
     }
     
     // Use file storage in local environment
@@ -73,21 +94,30 @@ async function readData(filename) {
   }
 }
 
-// Write data to file or MongoDB
+// Write data to file or memory
 async function writeData(filename, data) {
   try {
-    // Use MongoDB in Vercel
+    // Use in-memory storage in Vercel
     if (isVercel) {
-      console.log(`Writing data to MongoDB: ${filename}`);
+      console.log(`Writing data to memory: ${filename}`);
+      memoryStorage[filename] = data;
       
-      const { db } = await connectToDatabase();
-      const collection = db.collection('metadata');
-      
-      await collection.updateOne(
-        { key: filename },
-        { $set: { value: data } },
-        { upsert: true }
-      );
+      // Try to use MongoDB if available
+      try {
+        const { connectToDatabase } = require('../utils/mongodb');
+        const { db } = await connectToDatabase();
+        const collection = db.collection('metadata');
+        
+        await collection.updateOne(
+          { key: filename },
+          { $set: { value: data } },
+          { upsert: true }
+        );
+        
+        console.log(`Wrote data to MongoDB: ${filename}`);
+      } catch (error) {
+        console.warn('MongoDB write failed, using in-memory storage only:', error.message);
+      }
       
       return true;
     }
@@ -104,17 +134,26 @@ async function writeData(filename, data) {
   }
 }
 
-// Delete data from file or MongoDB
+// Delete data from file or memory
 async function deleteData(filename) {
   try {
-    // Use MongoDB in Vercel
+    // Use in-memory storage in Vercel
     if (isVercel) {
-      console.log(`Deleting data from MongoDB: ${filename}`);
+      console.log(`Deleting data from memory: ${filename}`);
+      delete memoryStorage[filename];
       
-      const { db } = await connectToDatabase();
-      const collection = db.collection('metadata');
+      // Try to use MongoDB if available
+      try {
+        const { connectToDatabase } = require('../utils/mongodb');
+        const { db } = await connectToDatabase();
+        const collection = db.collection('metadata');
+        
+        await collection.deleteOne({ key: filename });
+        console.log(`Deleted data from MongoDB: ${filename}`);
+      } catch (error) {
+        console.warn('MongoDB delete failed, using in-memory storage only:', error.message);
+      }
       
-      await collection.deleteOne({ key: filename });
       return true;
     }
     
@@ -141,15 +180,24 @@ async function deleteData(filename) {
 // List all data files
 async function listData() {
   try {
-    // Use MongoDB in Vercel
+    // Use in-memory storage in Vercel
     if (isVercel) {
-      console.log('Listing data from MongoDB');
+      console.log('Listing data from memory');
       
-      const { db } = await connectToDatabase();
-      const collection = db.collection('metadata');
+      // Try to use MongoDB if available
+      try {
+        const { connectToDatabase } = require('../utils/mongodb');
+        const { db } = await connectToDatabase();
+        const collection = db.collection('metadata');
+        
+        const docs = await collection.find({}).toArray();
+        console.log(`Listed data from MongoDB: ${docs.length} items`);
+        return docs.map(doc => doc.key);
+      } catch (error) {
+        console.warn('MongoDB list failed, using in-memory storage only:', error.message);
+      }
       
-      const docs = await collection.find({}).toArray();
-      return docs.map(doc => doc.key);
+      return Object.keys(memoryStorage);
     }
     
     // Use file storage in local environment
