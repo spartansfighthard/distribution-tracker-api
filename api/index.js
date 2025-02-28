@@ -20,9 +20,14 @@ const CONFIG = {
   },
   // Transaction fetching
   transactions: {
-    maxTransactionsToFetch: 10,  // Only fetch 10 transactions at a time
+    maxTransactionsToFetch: 5,   // Reduced from 10 to 5 to speed up processing
     cacheExpiration: 30 * 60 * 1000, // Cache expiration time in ms (30 minutes)
-    maxTransactionsPerRequest: 5, // Maximum number of transactions to process per API request
+    maxTransactionsPerRequest: 2, // Reduced from 5 to 2 to avoid timeouts
+  },
+  // Vercel optimization
+  vercel: {
+    maxProcessingTime: 10000,    // Maximum processing time in ms (10 seconds)
+    maxTransactionsPerServerlessRequest: 2 // Maximum transactions to process in a single serverless request
   }
 };
 
@@ -134,7 +139,8 @@ const heliusRateLimiter = new RateLimiter(CONFIG.rateLimits.requestsPerSecond);
 // Create Express app
 const app = express();
 
-// In-memory storage for transactions
+// In-memory storage for transactions - NOTE: This won't persist between serverless function invocations
+// For Vercel, we'll need to fetch fresh data on each request
 const transactions = [];
 let lastFetchTimestamp = null;
 
@@ -212,15 +218,18 @@ class Transaction {
   }
 }
 
-// Fetch transactions from Helius API
-async function fetchTransactions() {
+// Fetch transactions from Helius API - Optimized for serverless
+async function fetchTransactions(limit = CONFIG.transactions.maxTransactionsToFetch) {
   try {
-    console.log('Fetching transactions from Helius API...');
+    console.log(`Fetching transactions from Helius API (limit: ${limit})...`);
     
     if (!HELIUS_API_KEY || !HELIUS_RPC_URL || !DISTRIBUTION_WALLET_ADDRESS) {
       console.error('Missing required environment variables for Helius service');
       return [];
     }
+    
+    // For Vercel, we need to be mindful of the 15-second timeout
+    const startTime = Date.now();
     
     // Prepare request data
     const requestData = {
@@ -230,7 +239,7 @@ async function fetchTransactions() {
       params: [
         DISTRIBUTION_WALLET_ADDRESS,
         {
-          limit: CONFIG.transactions.maxTransactionsToFetch
+          limit: limit
         }
       ]
     };
@@ -256,25 +265,28 @@ async function fetchTransactions() {
     );
     console.log(`Found ${newSignatures.length} new signatures to process`);
     
-    // Process signatures in smaller batches with longer delays
-    const batchSize = CONFIG.rateLimits.batchSize;
-    const newTransactions = [];
-    
-    // Only process a limited number of signatures to avoid overwhelming the API
-    const maxSignaturesToProcess = Math.min(
-      newSignatures.length, 
-      CONFIG.transactions.maxTransactionsPerRequest
-    );
+    // For Vercel, limit the number of signatures we process to avoid timeouts
+    const maxSignaturesToProcess = process.env.VERCEL 
+      ? Math.min(newSignatures.length, CONFIG.vercel.maxTransactionsPerServerlessRequest)
+      : Math.min(newSignatures.length, CONFIG.transactions.maxTransactionsPerRequest);
     
     const signaturesToProcess = newSignatures.slice(0, maxSignaturesToProcess);
     
     if (signaturesToProcess.length < newSignatures.length) {
-      console.log(`Limiting processing to ${maxSignaturesToProcess} signatures out of ${newSignatures.length} to avoid rate limits`);
+      console.log(`Limiting processing to ${maxSignaturesToProcess} signatures out of ${newSignatures.length} to avoid timeouts`);
     }
+    
+    const newTransactions = [];
     
     // Process one signature at a time with significant delays between each
     for (const sig of signaturesToProcess) {
       try {
+        // Check if we're approaching the Vercel timeout
+        if (process.env.VERCEL && (Date.now() - startTime) > CONFIG.vercel.maxProcessingTime) {
+          console.log(`Approaching Vercel timeout limit, stopping processing after ${newTransactions.length} transactions`);
+          break;
+        }
+        
         console.log(`Processing signature: ${sig.signature}`);
         
         const txDetails = await getTransactionDetails(sig.signature);
@@ -283,8 +295,8 @@ async function fetchTransactions() {
           console.log(`Successfully processed transaction: ${sig.signature}`);
         }
         
-        // Add a significant delay between processing signatures
-        if (signaturesToProcess.indexOf(sig) < signaturesToProcess.length - 1) {
+        // Add a delay between processing signatures, but only if not on Vercel
+        if (!process.env.VERCEL && signaturesToProcess.indexOf(sig) < signaturesToProcess.length - 1) {
           console.log(`Waiting ${CONFIG.rateLimits.batchDelay}ms before processing next signature...`);
           await setTimeoutPromise(CONFIG.rateLimits.batchDelay);
         }
@@ -311,10 +323,10 @@ async function fetchTransactions() {
   }
 }
 
-// Get transaction details from Helius API
+// Get transaction details from Helius API - Optimized for serverless
 async function getTransactionDetails(signature) {
   let retries = 0;
-  const maxRetries = CONFIG.rateLimits.maxRetries;
+  const maxRetries = process.env.VERCEL ? 1 : CONFIG.rateLimits.maxRetries; // Reduce retries on Vercel
   
   while (retries <= maxRetries) {
     try {
@@ -360,6 +372,12 @@ async function getTransactionDetails(signature) {
       return null;
     } catch (error) {
       retries++;
+      
+      // If we're on Vercel, we need to be more aggressive about giving up to avoid timeouts
+      if (process.env.VERCEL) {
+        console.error(`Error getting transaction details for ${signature} on Vercel:`, error.message);
+        return null;
+      }
       
       // If we've hit a rate limit and have retries left, wait and try again
       if (error.response && error.response.status === 429 && retries <= maxRetries) {
@@ -499,9 +517,28 @@ function getStats() {
   }
 }
 
-// Wrap API endpoints with error handling
-const asyncHandler = fn => (req, res, next) => {
-  Promise.resolve(fn(req, res, next)).catch(next);
+// Wrap API endpoints with error handling and timeout protection
+const asyncHandler = fn => async (req, res, next) => {
+  try {
+    // Set a timeout for Vercel functions
+    if (process.env.VERCEL) {
+      const timeoutPromise = new Promise((_, reject) => {
+        nodeSetTimeout(() => {
+          reject(new Error('Request processing timeout - approaching Vercel 15s limit'));
+        }, CONFIG.vercel.maxProcessingTime);
+      });
+      
+      // Race between the actual handler and the timeout
+      await Promise.race([
+        Promise.resolve(fn(req, res, next)),
+        timeoutPromise
+      ]);
+    } else {
+      await fn(req, res, next);
+    }
+  } catch (error) {
+    next(error);
+  }
 };
 
 // Root route handler
@@ -510,6 +547,8 @@ app.get('/', (req, res) => {
     success: true,
     message: 'SOL Distribution Tracker API is running',
     version: process.env.npm_package_version || '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    vercel: process.env.VERCEL ? true : false,
     endpoints: [
       '/api/stats',
       '/api/distributed',
@@ -552,15 +591,21 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
   console.log('Getting overall SOL statistics...');
   
   try {
-    // If no transactions or cache expired, try to fetch some
-    const cacheExpired = lastFetchTimestamp && 
-      (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
-    
-    // Only fetch new transactions if we have none or cache is expired
-    if (transactions.length === 0 || cacheExpired) {
-      await fetchTransactions();
+    // For Vercel, we always need to fetch fresh data since the in-memory storage doesn't persist
+    if (process.env.VERCEL || transactions.length === 0) {
+      // Use a smaller limit for Vercel to avoid timeouts
+      const limit = process.env.VERCEL ? CONFIG.vercel.maxTransactionsPerServerlessRequest : CONFIG.transactions.maxTransactionsToFetch;
+      await fetchTransactions(limit);
     } else {
-      console.log(`Using cached transactions (${transactions.length} transactions)`);
+      // For non-Vercel environments, check cache expiration
+      const cacheExpired = lastFetchTimestamp && 
+        (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
+      
+      if (cacheExpired) {
+        await fetchTransactions();
+      } else {
+        console.log(`Using cached transactions (${transactions.length} transactions)`);
+      }
     }
     
     // Get transaction statistics
@@ -571,11 +616,11 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
       success: true,
       timestamp: new Date().toISOString(),
       lastFetch: lastFetchTimestamp,
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
       cacheStatus: {
         transactionCount: transactions.length,
-        cacheExpired: cacheExpired,
-        cacheExpiresIn: cacheExpired ? 0 : 
-          CONFIG.transactions.cacheExpiration - (new Date() - new Date(lastFetchTimestamp))
+        note: process.env.VERCEL ? "Data is fetched fresh on each request in Vercel environment" : "Using cached data when available"
       },
       stats
     });
@@ -595,12 +640,19 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
 app.get('/api/distributed', asyncHandler(async (req, res) => {
   console.log('Getting SOL distribution data...');
   
-  // If no transactions or cache expired, try to fetch some
-  const cacheExpired = lastFetchTimestamp && 
-    (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
-  
-  if (transactions.length === 0 || cacheExpired) {
-    await fetchTransactions();
+  // For Vercel, we always need to fetch fresh data
+  if (process.env.VERCEL || transactions.length === 0) {
+    // Use a smaller limit for Vercel to avoid timeouts
+    const limit = process.env.VERCEL ? CONFIG.vercel.maxTransactionsPerServerlessRequest : CONFIG.transactions.maxTransactionsToFetch;
+    await fetchTransactions(limit);
+  } else {
+    // For non-Vercel environments, check cache expiration
+    const cacheExpired = lastFetchTimestamp && 
+      (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
+    
+    if (cacheExpired) {
+      await fetchTransactions();
+    }
   }
   
   // Get transactions with type 'sent'
@@ -619,13 +671,15 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
     smallestDistribution: sentTransactions.length > 0 
       ? Math.min(...sentTransactions.map(tx => tx.amount)) 
       : 0,
-    recentDistributions: sentTransactions.slice(0, 5)
+    recentDistributions: sentTransactions.slice(0, 3) // Reduced from 5 to 3
   };
   
   // Return statistics
   res.json({
     success: true,
     timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    vercel: process.env.VERCEL ? true : false,
     stats
   });
 }));
@@ -634,12 +688,19 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
 app.get('/api/sol', asyncHandler(async (req, res) => {
   console.log('Getting detailed SOL transfer statistics...');
   
-  // If no transactions or cache expired, try to fetch some
-  const cacheExpired = lastFetchTimestamp && 
-    (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
-  
-  if (transactions.length === 0 || cacheExpired) {
-    await fetchTransactions();
+  // For Vercel, we always need to fetch fresh data
+  if (process.env.VERCEL || transactions.length === 0) {
+    // Use a smaller limit for Vercel to avoid timeouts
+    const limit = process.env.VERCEL ? CONFIG.vercel.maxTransactionsPerServerlessRequest : CONFIG.transactions.maxTransactionsToFetch;
+    await fetchTransactions(limit);
+  } else {
+    // For non-Vercel environments, check cache expiration
+    const cacheExpired = lastFetchTimestamp && 
+      (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
+    
+    if (cacheExpired) {
+      await fetchTransactions();
+    }
   }
   
   // Get transactions for SOL
@@ -666,13 +727,15 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
         : 0
     },
     balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0),
-    recentTransactions: solTransactions.slice(0, 5)
+    recentTransactions: solTransactions.slice(0, 3) // Reduced from 5 to 3
   };
   
   // Return statistics
   res.json({
     success: true,
     timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    vercel: process.env.VERCEL ? true : false,
     stats
   });
 }));
@@ -682,35 +745,24 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
   console.log('Refreshing historical transaction data...');
   
   try {
-    // Check if we've fetched recently to avoid rate limits
-    const lastFetchTime = lastFetchTimestamp ? new Date(lastFetchTimestamp) : null;
-    const timeSinceLastFetch = lastFetchTime ? (new Date() - lastFetchTime) : Infinity;
+    // For Vercel, we need to be careful about timeouts
+    const limit = process.env.VERCEL 
+      ? CONFIG.vercel.maxTransactionsPerServerlessRequest 
+      : CONFIG.transactions.maxTransactionsToFetch;
     
-    if (timeSinceLastFetch < 60000) { // 1 minute
-      console.log(`Last fetch was ${Math.round(timeSinceLastFetch / 1000)} seconds ago. Skipping to avoid rate limits.`);
-      
-      return res.json({
-        success: true,
-        timestamp: new Date().toISOString(),
-        message: 'Skipped refresh to avoid rate limits',
-        lastFetch: lastFetchTimestamp,
-        waitTime: 60000 - timeSinceLastFetch,
-        totalTransactions: transactions.length,
-        recentTransactions: transactions.slice(0, 5)
-      });
-    }
-    
-    // Fetch transactions
-    const newTransactions = await fetchTransactions();
+    // Fetch transactions with appropriate limit
+    const newTransactions = await fetchTransactions(limit);
     
     // Return transactions
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
       message: 'Historical transaction data refreshed successfully',
       count: newTransactions.length,
       totalTransactions: transactions.length,
-      recentTransactions: transactions.slice(0, 5)
+      recentTransactions: transactions.slice(0, 3) // Reduced from 5 to 3
     });
   } catch (error) {
     console.error('Error in /api/refresh:', error);
