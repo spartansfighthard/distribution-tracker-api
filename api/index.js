@@ -10,17 +10,18 @@ const { setTimeout } = require('timers/promises');
 const CONFIG = {
   // API rate limiting
   rateLimits: {
-    requestsPerSecond: 1,       // Reduced from 2 to 1 request per second
-    retryDelay: 5000,           // Increased from 2000 to 5000ms
-    maxRetries: 5,              // Increased from 3 to 5 retries
-    batchSize: 3,               // Reduced from 5 to 3 transactions per batch
-    batchDelay: 5000,           // Increased from 2000 to 5000ms
-    initialBackoff: 10000,      // Initial backoff time when hitting rate limits
+    requestsPerSecond: 0.2,      // Ultra conservative: 1 request per 5 seconds
+    retryDelay: 15000,           // 15 seconds base delay for retries
+    maxRetries: 3,               // Maximum number of retries for failed requests
+    batchSize: 1,                // Process only one transaction at a time
+    batchDelay: 10000,           // 10 seconds between batches
+    initialBackoff: 30000,       // 30 seconds initial backoff time
   },
   // Transaction fetching
   transactions: {
-    maxTransactionsToFetch: 50, // Reduced from 100 to 50 transactions
-    cacheExpiration: 5 * 60 * 1000, // Cache expiration time in ms (5 minutes)
+    maxTransactionsToFetch: 10,  // Only fetch 10 transactions at a time
+    cacheExpiration: 30 * 60 * 1000, // Cache expiration time in ms (30 minutes)
+    maxTransactionsPerRequest: 5, // Maximum number of transactions to process per API request
   }
 };
 
@@ -32,13 +33,25 @@ class RateLimiter {
     this.processing = false;
     this.lastRequestTime = 0;
     this.consecutiveErrors = 0;
+    this.requestCount = 0;
+    this.lastRateLimitTime = null;
+    this.cooldownPeriod = 60000; // 1 minute cooldown after rate limit
   }
 
   async throttle() {
     const now = Date.now();
+    
+    // If we've hit a rate limit recently, enforce a longer cooldown
+    if (this.lastRateLimitTime && (now - this.lastRateLimitTime) < this.cooldownPeriod) {
+      const remainingCooldown = this.cooldownPeriod - (now - this.lastRateLimitTime);
+      console.log(`In cooldown period after rate limit. Waiting ${remainingCooldown}ms before next request`);
+      await setTimeout(remainingCooldown);
+    }
+    
     // Add extra delay if we've had consecutive errors
-    const extraDelay = this.consecutiveErrors * 1000; // 1 second per consecutive error
-    const timeToWait = Math.max(0, (1000 / this.requestsPerSecond) - (now - this.lastRequestTime)) + extraDelay;
+    const extraDelay = this.consecutiveErrors * 5000; // 5 seconds per consecutive error
+    const baseDelay = Math.max(0, (1000 / this.requestsPerSecond) - (now - this.lastRequestTime));
+    const timeToWait = baseDelay + extraDelay;
     
     if (timeToWait > 0) {
       console.log(`Rate limiting: waiting ${timeToWait}ms before next request (consecutive errors: ${this.consecutiveErrors})`);
@@ -46,6 +59,7 @@ class RateLimiter {
     }
     
     this.lastRequestTime = Date.now();
+    this.requestCount++;
   }
 
   // Add request to queue and process
@@ -78,23 +92,31 @@ class RateLimiter {
       this.consecutiveErrors = 0;
       resolve(result);
     } catch (error) {
-      // Increment consecutive errors
-      this.consecutiveErrors++;
-      
-      // If we hit a rate limit, wait longer and retry
+      // If we hit a rate limit, record the time and increment consecutive errors
       if (error.response && error.response.status === 429) {
+        this.consecutiveErrors++;
+        this.lastRateLimitTime = Date.now();
+        
         const waitTime = CONFIG.rateLimits.initialBackoff * Math.pow(2, this.consecutiveErrors - 1);
         console.log(`Rate limit hit, waiting ${waitTime}ms before continuing (consecutive errors: ${this.consecutiveErrors})...`);
         await setTimeout(waitTime);
         
-        // Put the request back at the front of the queue
-        this.queue.unshift({ requestFn, resolve, reject });
+        // Put the request back at the front of the queue if we haven't exceeded max retries
+        if (this.consecutiveErrors <= CONFIG.rateLimits.maxRetries) {
+          console.log(`Retrying request after rate limit (attempt ${this.consecutiveErrors}/${CONFIG.rateLimits.maxRetries})`);
+          this.queue.unshift({ requestFn, resolve, reject });
+        } else {
+          console.log(`Exceeded maximum retries (${CONFIG.rateLimits.maxRetries}) after rate limit`);
+          reject(error);
+        }
       } else {
+        // For other errors, increment consecutive errors but don't retry
+        this.consecutiveErrors++;
         reject(error);
       }
     } finally {
       // Continue processing queue after a delay
-      setTimeout(() => this.processQueue(), 500);
+      setTimeout(() => this.processQueue(), 1000);
     }
   }
 
@@ -237,38 +259,42 @@ async function fetchTransactions() {
     const newTransactions = [];
     
     // Only process a limited number of signatures to avoid overwhelming the API
-    const maxSignaturesToProcess = Math.min(newSignatures.length, 20);
+    const maxSignaturesToProcess = Math.min(
+      newSignatures.length, 
+      CONFIG.transactions.maxTransactionsPerRequest
+    );
+    
     const signaturesToProcess = newSignatures.slice(0, maxSignaturesToProcess);
     
     if (signaturesToProcess.length < newSignatures.length) {
       console.log(`Limiting processing to ${maxSignaturesToProcess} signatures out of ${newSignatures.length} to avoid rate limits`);
     }
     
-    for (let i = 0; i < signaturesToProcess.length; i += batchSize) {
-      console.log(`Processing batch ${Math.floor(i/batchSize) + 1} of ${Math.ceil(signaturesToProcess.length/batchSize)}`);
-      
-      const batch = signaturesToProcess.slice(i, i + batchSize);
-      
-      // Process one signature at a time to better control rate limiting
-      for (const sig of batch) {
-        try {
-          const txDetails = await getTransactionDetails(sig.signature);
-          if (txDetails) {
-            newTransactions.push(txDetails);
-          }
-          // Add a small delay between each signature in the batch
-          await setTimeout(1000);
-        } catch (error) {
-          console.error(`Error processing signature ${sig.signature}:`, error.message);
-          // Continue with next signature
-          continue;
+    // Process one signature at a time with significant delays between each
+    for (const sig of signaturesToProcess) {
+      try {
+        console.log(`Processing signature: ${sig.signature}`);
+        
+        const txDetails = await getTransactionDetails(sig.signature);
+        if (txDetails) {
+          newTransactions.push(txDetails);
+          console.log(`Successfully processed transaction: ${sig.signature}`);
         }
-      }
-      
-      // Add a longer delay between batches
-      if (i + batchSize < signaturesToProcess.length) {
-        console.log(`Waiting ${CONFIG.rateLimits.batchDelay}ms between batches to respect rate limits...`);
-        await setTimeout(CONFIG.rateLimits.batchDelay);
+        
+        // Add a significant delay between processing signatures
+        if (signaturesToProcess.indexOf(sig) < signaturesToProcess.length - 1) {
+          console.log(`Waiting ${CONFIG.rateLimits.batchDelay}ms before processing next signature...`);
+          await setTimeout(CONFIG.rateLimits.batchDelay);
+        }
+      } catch (error) {
+        console.error(`Error processing signature ${sig.signature}:`, error.message);
+        // If we hit a rate limit, stop processing further signatures
+        if (error.response && error.response.status === 429) {
+          console.log('Rate limit hit, stopping further processing for this request');
+          break;
+        }
+        // Continue with next signature
+        continue;
       }
     }
     
@@ -340,8 +366,8 @@ async function getTransactionDetails(signature) {
         await setTimeout(waitTime);
       } else if (retries <= maxRetries) {
         // For other errors, wait a bit less before retrying
-        console.log(`Error fetching transaction, retrying in 2000ms (attempt ${retries}/${maxRetries})...`);
-        await setTimeout(2000);
+        console.log(`Error fetching transaction, retrying in 5000ms (attempt ${retries}/${maxRetries})...`);
+        await setTimeout(5000);
       } else {
         // We've exhausted our retries
         console.error(`Error getting transaction details for ${signature} after ${maxRetries} retries:`, error.message);
@@ -523,23 +549,44 @@ app.get('/api/help', (req, res) => {
 app.get('/api/stats', asyncHandler(async (req, res) => {
   console.log('Getting overall SOL statistics...');
   
-  // If no transactions or cache expired, try to fetch some
-  const cacheExpired = lastFetchTimestamp && 
-    (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
-  
-  if (transactions.length === 0 || cacheExpired) {
-    await fetchTransactions();
+  try {
+    // If no transactions or cache expired, try to fetch some
+    const cacheExpired = lastFetchTimestamp && 
+      (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
+    
+    // Only fetch new transactions if we have none or cache is expired
+    if (transactions.length === 0 || cacheExpired) {
+      await fetchTransactions();
+    } else {
+      console.log(`Using cached transactions (${transactions.length} transactions)`);
+    }
+    
+    // Get transaction statistics
+    const stats = getStats();
+    
+    // Return statistics
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      lastFetch: lastFetchTimestamp,
+      cacheStatus: {
+        transactionCount: transactions.length,
+        cacheExpired: cacheExpired,
+        cacheExpiresIn: cacheExpired ? 0 : 
+          CONFIG.transactions.cacheExpiration - (new Date() - new Date(lastFetchTimestamp))
+      },
+      stats
+    });
+  } catch (error) {
+    console.error('Error in /api/stats:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to get statistics',
+        details: error.message
+      }
+    });
   }
-  
-  // Get transaction statistics
-  const stats = getStats();
-  
-  // Return statistics
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    stats
-  });
 }));
 
 // Get SOL distribution data
@@ -632,18 +679,47 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
 app.post('/api/refresh', asyncHandler(async (req, res) => {
   console.log('Refreshing historical transaction data...');
   
-  // Fetch transactions
-  const newTransactions = await fetchTransactions();
-  
-  // Return transactions
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    message: 'Historical transaction data refreshed successfully',
-    count: newTransactions.length,
-    totalTransactions: transactions.length,
-    recentTransactions: transactions.slice(0, 5)
-  });
+  try {
+    // Check if we've fetched recently to avoid rate limits
+    const lastFetchTime = lastFetchTimestamp ? new Date(lastFetchTimestamp) : null;
+    const timeSinceLastFetch = lastFetchTime ? (new Date() - lastFetchTime) : Infinity;
+    
+    if (timeSinceLastFetch < 60000) { // 1 minute
+      console.log(`Last fetch was ${Math.round(timeSinceLastFetch / 1000)} seconds ago. Skipping to avoid rate limits.`);
+      
+      return res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        message: 'Skipped refresh to avoid rate limits',
+        lastFetch: lastFetchTimestamp,
+        waitTime: 60000 - timeSinceLastFetch,
+        totalTransactions: transactions.length,
+        recentTransactions: transactions.slice(0, 5)
+      });
+    }
+    
+    // Fetch transactions
+    const newTransactions = await fetchTransactions();
+    
+    // Return transactions
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      message: 'Historical transaction data refreshed successfully',
+      count: newTransactions.length,
+      totalTransactions: transactions.length,
+      recentTransactions: transactions.slice(0, 5)
+    });
+  } catch (error) {
+    console.error('Error in /api/refresh:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to refresh transaction data',
+        details: error.message
+      }
+    });
+  }
 }));
 
 // Add a sample transaction (for testing)
