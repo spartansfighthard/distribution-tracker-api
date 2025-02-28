@@ -1108,7 +1108,7 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
       };
       
-      // Return statistics
+      // Return statistics only (no transaction lists)
       return res.json({
         success: true,
         timestamp: new Date().toISOString(),
@@ -1116,11 +1116,11 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         vercel: true,
         note: "Running in optimized mode for Vercel serverless environment",
         stats: formattedStats,
-        rawStats: {
+        transactionCounts: {
           totalStoredTransactions: transactions.length,
-          displayedTransactions: fetchedTransactions.length,
-          recentTransactions: solTransactions.slice(0, 10),
-          allTransactions: solTransactions
+          solTransactions: solTransactions.length,
+          receivedTransactions: receivedTransactions.length,
+          sentTransactions: sentTransactions.length
         },
         fetchedAt: new Date().toISOString()
       });
@@ -1222,7 +1222,7 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
       solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
     };
     
-    // Return statistics
+    // Return statistics and ALL transactions
     return res.json({
       success: true,
       timestamp: new Date().toISOString(),
@@ -1230,11 +1230,11 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
       vercel: true,
       note: "Running in optimized mode for Vercel serverless environment",
       stats: formattedStats,
-      distributions: {
+      transactions: {
         totalStoredTransactions: transactions.length,
         totalDistributions: sentTransactions.length,
-        recentDistributions: sentTransactions.slice(0, 10),
-        allDistributions: sentTransactions
+        allTransactions: transactions, // Include ALL transactions
+        allDistributions: sentTransactions // Include ALL distributions
       },
       fetchedAt: new Date().toISOString()
     });
@@ -1278,7 +1278,9 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     vercel: false,
-    stats
+    stats,
+    allTransactions: transactions,
+    allDistributions: sentTransactions
   });
 }));
 
@@ -1332,7 +1334,7 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
       solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
     };
     
-    // Return statistics
+    // Return statistics and ALL SOL transactions
     return res.json({
       success: true,
       timestamp: new Date().toISOString(),
@@ -1343,10 +1345,9 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
       transactions: {
         totalStoredTransactions: transactions.length,
         totalSolTransactions: solTransactions.length,
-        recentTransactions: solTransactions.slice(0, 10),
-        allTransactions: solTransactions,
-        receivedTransactions: received,
-        sentTransactions: sent
+        allTransactions: solTransactions, // Include ALL SOL transactions
+        receivedTransactions: received,    // Include ALL received transactions
+        sentTransactions: sent            // Include ALL sent transactions
       },
       fetchedAt: new Date().toISOString()
     });
@@ -1392,20 +1393,17 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
     recentTransactions: solTransactions.slice(0, 5)
   };
   
-  // Return statistics
+  // Return statistics and ALL SOL transactions
   res.json({
     success: true,
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     vercel: true,
     note: "Running in optimized mode for Vercel serverless environment",
-    stats: {
-      ...stats,
-      totalStoredTransactions: transactions.length,
-      displayedTransactions: solTransactions.length,
-      recentTransactions: solTransactions.slice(0, 10),
-      allTransactions: transactions.filter(tx => tx.token === 'SOL')
-    },
+    stats,
+    allTransactions: solTransactions,
+    receivedTransactions: received,
+    sentTransactions: sent,
     fetchedAt: new Date().toISOString()
   });
 }));
