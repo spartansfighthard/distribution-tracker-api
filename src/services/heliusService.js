@@ -1,223 +1,128 @@
 const axios = require('axios');
 const Transaction = require('../models/Transaction');
 const { PublicKey } = require('@solana/web3.js');
+const fileStorage = require('./fileStorage');
 
 // Constants
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL;
-const DISTRIBUTION_WALLET = process.env.DISTRIBUTION_WALLET_ADDRESS;
+const DISTRIBUTION_WALLET_ADDRESS = process.env.DISTRIBUTION_WALLET_ADDRESS;
+const TAX_TOKEN_MINT_ADDRESS = process.env.TAX_TOKEN_MINT_ADDRESS;
 const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
-const TAX_TOKEN_MINT = process.env.TAX_TOKEN_MINT || '';
 
-// Helper function to determine if a transaction is a tax collection
-const isTaxCollection = (transaction) => {
-  // Check if this is an incoming transaction to the distribution wallet
-  const isIncoming = transaction.tokenTransfers?.some(transfer => 
-    transfer.toUserAccount === DISTRIBUTION_WALLET
-  );
-  
-  // Check if this is a SOL transfer to the distribution wallet
-  const isSolIncoming = transaction.nativeTransfers?.some(transfer => 
-    transfer.toUserAccount === DISTRIBUTION_WALLET
-  );
-  
-  // If we have a specific tax token mint, check if the incoming transfer is for that token
-  if (TAX_TOKEN_MINT && isIncoming) {
-    return transaction.tokenTransfers?.some(transfer => 
-      transfer.toUserAccount === DISTRIBUTION_WALLET && 
-      transfer.mint === TAX_TOKEN_MINT
-    );
-  }
-  
-  return isIncoming || isSolIncoming;
-};
+// Log configuration for debugging
+console.log(`Helius configuration:
+  - API Key: ${HELIUS_API_KEY ? '✓ Set' : '✗ Not set'}
+  - RPC URL: ${HELIUS_RPC_URL ? '✓ Set' : '✗ Not set'}
+  - Distribution Wallet: ${DISTRIBUTION_WALLET_ADDRESS ? '✓ Set' : '✗ Not set'}
+  - Tax Token Mint: ${TAX_TOKEN_MINT_ADDRESS ? '✓ Set' : '✗ Not set'}`
+);
 
-// Helper function to determine if a transaction is a tax distribution
-const isTaxDistribution = (transaction) => {
-  // Check if this is an outgoing transaction from the distribution wallet
-  const isOutgoing = transaction.tokenTransfers?.some(transfer => 
-    transfer.fromUserAccount === DISTRIBUTION_WALLET
-  );
-  
-  // Check if this is a SOL transfer from the distribution wallet
-  const isSolOutgoing = transaction.nativeTransfers?.some(transfer => 
-    transfer.fromUserAccount === DISTRIBUTION_WALLET
-  );
-  
-  // If we have a specific tax token mint, check if the outgoing transfer is for that token
-  if (TAX_TOKEN_MINT && isOutgoing) {
-    return transaction.tokenTransfers?.some(transfer => 
-      transfer.fromUserAccount === DISTRIBUTION_WALLET && 
-      transfer.mint === TAX_TOKEN_MINT
-    );
-  }
-  
-  return isOutgoing || isSolOutgoing;
-};
-
-// Helper function to detect if a transaction is a swap
-const isSwapTransaction = (transaction) => {
-  // Check for common swap program IDs
-  const swapProgramIds = [
-    'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter
-    'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB', // Jupiter v4
-    'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc', // Orca Whirlpool
-    '9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP', // Raydium
-    // Add other known swap program IDs here
-  ];
-  
-  // Check if any of the accounts in the transaction match known swap programs
-  return transaction.accountData?.some(account => 
-    swapProgramIds.includes(account.account)
-  ) || false;
-};
-
-// Helper function to process a transaction and save it to the database
-const processTransaction = async (transaction) => {
+// Initialize service
+async function initialize() {
   try {
-    // Check if transaction already exists in the database
-    const existingTransaction = Transaction.findOne({ signature: transaction.signature });
-    if (existingTransaction) {
-      return null; // Skip if already processed
+    console.log('Initializing Helius service...');
+    console.log(`Distribution wallet: ${DISTRIBUTION_WALLET_ADDRESS}`);
+    console.log(`Tax token mint: ${TAX_TOKEN_MINT_ADDRESS || 'Not set'}`);
+    
+    // Check if we have the required environment variables
+    if (!HELIUS_API_KEY || !HELIUS_RPC_URL || !DISTRIBUTION_WALLET_ADDRESS) {
+      console.error('Missing required environment variables for Helius service');
+      return false;
     }
     
-    // Determine transaction type
-    let type = 'other';
-    if (isTaxCollection(transaction)) {
-      type = 'collection';
-    } else if (isTaxDistribution(transaction)) {
-      type = 'distribution';
+    // Load last fetch timestamp from storage
+    const lastFetchData = await fileStorage.readData('lastFetch.json');
+    if (lastFetchData && lastFetchData.timestamp) {
+      Transaction.setLastFetchTimestamp(lastFetchData.timestamp);
+      console.log(`Loaded last fetch timestamp: ${lastFetchData.timestamp}`);
+    } else {
+      // Set default last fetch timestamp (24 hours ago)
+      const oneDayAgo = new Date();
+      oneDayAgo.setDate(oneDayAgo.getDate() - 1);
+      Transaction.setLastFetchTimestamp(oneDayAgo.toISOString());
+      console.log(`Set default last fetch timestamp: ${oneDayAgo.toISOString()}`);
     }
     
-    // Check if this is a swap transaction
-    const isSwap = isSwapTransaction(transaction);
-    
-    // Extract token amounts
-    const tokenAmount = transaction.tokenTransfers?.reduce((total, transfer) => {
-      if (transfer.toUserAccount === DISTRIBUTION_WALLET) {
-        return total + parseFloat(transfer.tokenAmount);
-      }
-      if (transfer.fromUserAccount === DISTRIBUTION_WALLET) {
-        return total - parseFloat(transfer.tokenAmount);
-      }
-      return total;
-    }, 0) || 0;
-    
-    // Extract SOL amounts (in lamports, convert to SOL)
-    const solAmount = transaction.nativeTransfers?.reduce((total, transfer) => {
-      if (transfer.toUserAccount === DISTRIBUTION_WALLET) {
-        return total + (parseFloat(transfer.amount) / 1_000_000_000); // Convert lamports to SOL
-      }
-      if (transfer.fromUserAccount === DISTRIBUTION_WALLET) {
-        return total - (parseFloat(transfer.amount) / 1_000_000_000); // Convert lamports to SOL
-      }
-      return total;
-    }, 0) || 0;
-    
-    // Determine token mint
-    let tokenMint = null;
-    if (transaction.tokenTransfers && transaction.tokenTransfers.length > 0) {
-      // If we have a specific tax token mint and this is a tax transaction, prioritize that token
-      if (TAX_TOKEN_MINT && (type === 'collection' || type === 'distribution')) {
-        const taxTokenTransfer = transaction.tokenTransfers.find(transfer => 
-          transfer.mint === TAX_TOKEN_MINT
-        );
-        
-        if (taxTokenTransfer) {
-          tokenMint = TAX_TOKEN_MINT;
-        } else {
-          tokenMint = transaction.tokenTransfers[0].mint;
-        }
-      } else {
-        tokenMint = transaction.tokenTransfers[0].mint;
-      }
-    } else if (solAmount !== 0) {
-      tokenMint = NATIVE_SOL_MINT; // Use native SOL mint address for SOL transfers
-    }
-    
-    // Check if this is a tax token transaction
-    const isTaxToken = tokenMint === TAX_TOKEN_MINT;
-    
-    // Safely handle timestamp conversion
-    let timestamp;
-    try {
-      // Check if timestamp exists and is valid
-      if (transaction.timestamp && !isNaN(transaction.timestamp)) {
-        timestamp = new Date(transaction.timestamp * 1000).toISOString();
-      } else {
-        // Use current time if timestamp is invalid
-        timestamp = new Date().toISOString();
-      }
-    } catch (error) {
-      console.warn(`Invalid timestamp for transaction ${transaction.signature}, using current time`);
-      timestamp = new Date().toISOString();
-    }
-    
-    // Create new transaction record
-    const newTransaction = {
-      signature: transaction.signature,
-      timestamp: timestamp,
-      type,
-      tokenAmount,
-      tokenMint,
-      solAmount,
-      fromAddress: transaction.tokenTransfers?.[0]?.fromUserAccount || 
-                  transaction.nativeTransfers?.[0]?.fromUserAccount || 
-                  transaction.feePayer,
-      toAddress: transaction.tokenTransfers?.[0]?.toUserAccount || 
-                transaction.nativeTransfers?.[0]?.toUserAccount || 
-                null,
-      isSwap,
-      isTaxToken,
-      // Store minimal transaction data to save space
-      rawData: {
-        signature: transaction.signature,
-        timestamp: transaction.timestamp,
-        feePayer: transaction.feePayer,
-        tokenTransfers: transaction.tokenTransfers,
-        nativeTransfers: transaction.nativeTransfers
-      }
-    };
-    
-    // Save to database
-    Transaction.save(newTransaction);
-    return newTransaction;
+    return true;
   } catch (error) {
-    console.error(`Error processing transaction ${transaction.signature}:`, error);
-    return null;
+    console.error('Error initializing Helius service:', error);
+    return false;
   }
-};
+}
 
 // Fetch transactions from Helius API
-const fetchTransactions = async (limit = 100, beforeSignature = null) => {
+async function fetchTransactions() {
   try {
-    const response = await axios.post(HELIUS_RPC_URL, {
+    console.log('Fetching transactions from Helius API...');
+    
+    // Get last fetch timestamp
+    const lastFetchTimestamp = Transaction.getLastFetchTimestamp();
+    console.log(`Last fetch timestamp: ${lastFetchTimestamp}`);
+    
+    // Prepare request data
+    const requestData = {
       jsonrpc: '2.0',
       id: 'my-id',
       method: 'getSignaturesForAddress',
       params: [
-        DISTRIBUTION_WALLET,
+        DISTRIBUTION_WALLET_ADDRESS,
         {
-          limit,
-          before: beforeSignature
+          limit: 100
         }
       ]
-    });
+    };
     
-    if (response.data.error) {
-      throw new Error(`Helius API error: ${response.data.error.message}`);
+    // Make request to Helius API
+    const response = await axios.post(HELIUS_RPC_URL, requestData);
+    
+    // Check if response is valid
+    if (!response.data || !response.data.result) {
+      console.error('Invalid response from Helius API:', response.data);
+      return [];
     }
     
-    return response.data.result || [];
+    // Get signatures from response
+    const signatures = response.data.result;
+    console.log(`Fetched ${signatures.length} signatures`);
+    
+    // Process each signature
+    const transactions = [];
+    for (const sig of signatures) {
+      // Skip if transaction is already processed
+      const existingTx = await Transaction.findOne({ signature: sig.signature });
+      if (existingTx) {
+        console.log(`Transaction already exists: ${sig.signature}`);
+        continue;
+      }
+      
+      // Get transaction details
+      const txDetails = await getTransactionDetails(sig.signature);
+      if (txDetails) {
+        transactions.push(txDetails);
+      }
+    }
+    
+    // Update last fetch timestamp
+    const now = new Date().toISOString();
+    Transaction.setLastFetchTimestamp(now);
+    await fileStorage.writeData('lastFetch.json', { timestamp: now });
+    
+    console.log(`Processed ${transactions.length} new transactions`);
+    return transactions;
   } catch (error) {
-    console.error('Error fetching transactions from Helius:', error);
-    throw error;
+    console.error('Error fetching transactions:', error);
+    return [];
   }
-};
+}
 
-// Fetch transaction details from Helius API
-const fetchTransactionDetails = async (signature) => {
+// Get transaction details from Helius API
+async function getTransactionDetails(signature) {
   try {
-    const response = await axios.post(HELIUS_RPC_URL, {
+    console.log(`Getting details for transaction: ${signature}`);
+    
+    // Prepare request data
+    const requestData = {
       jsonrpc: '2.0',
       id: 'my-id',
       method: 'getTransaction',
@@ -228,350 +133,255 @@ const fetchTransactionDetails = async (signature) => {
           maxSupportedTransactionVersion: 0
         }
       ]
-    });
+    };
     
-    if (response.data.error) {
-      throw new Error(`Helius API error: ${response.data.error.message}`);
+    // Make request to Helius API
+    const response = await axios.post(HELIUS_RPC_URL, requestData);
+    
+    // Check if response is valid
+    if (!response.data || !response.data.result) {
+      console.error('Invalid response from Helius API:', response.data);
+      return null;
     }
     
-    return response.data.result;
+    // Get transaction data
+    const txData = response.data.result;
+    
+    // Process transaction data
+    const transaction = processTransaction(signature, txData);
+    if (transaction) {
+      // Save transaction to database
+      const txModel = new Transaction(transaction);
+      await txModel.save();
+      return transaction;
+    }
+    
+    return null;
   } catch (error) {
-    console.error(`Error fetching transaction details for ${signature}:`, error);
-    return null; // Return null instead of throwing to allow processing to continue
+    console.error(`Error getting transaction details for ${signature}:`, error);
+    return null;
   }
-};
+}
 
-// Fetch and process transactions
-const fetchAndProcessTransactions = async (limit = 50) => {
+// Process transaction data
+function processTransaction(signature, txData) {
   try {
-    // Get the most recent transaction we've processed
-    const transactions = Transaction.find({}, { timestamp: -1 }, 1);
-    const latestTransaction = transactions.length > 0 ? transactions[0] : null;
-    const beforeSignature = latestTransaction ? latestTransaction.signature : null;
-    
-    console.log(`Looking for transactions ${beforeSignature ? 'before ' + beforeSignature : '(initial fetch)'}`);
-    
-    // Fetch transaction signatures
-    const signatures = await fetchTransactions(limit, beforeSignature);
-    console.log(`Fetched ${signatures.length} transaction signatures`);
-    
-    if (signatures.length === 0) {
-      console.log('No new transaction signatures found');
-      return 0;
+    // Check if transaction is valid
+    if (!txData || !txData.meta || txData.meta.err) {
+      console.log(`Skipping failed transaction: ${signature}`);
+      return null;
     }
     
-    // Process each transaction
-    let processed = 0;
-    let skipped = 0;
-    let errors = 0;
+    // Basic transaction data
+    const transaction = {
+      signature,
+      blockTime: txData.blockTime,
+      slot: txData.slot,
+      timestamp: new Date(txData.blockTime * 1000).toISOString(),
+      meta: {}
+    };
     
-    for (const sigData of signatures) {
-      try {
-        console.log(`Processing signature: ${sigData.signature}`);
+    // Determine transaction type and details
+    // This is a simplified version - you'll need to implement the full logic
+    // based on your specific requirements
+    
+    // Example: Check if transaction is a SOL transfer
+    const preBalances = txData.meta.preBalances;
+    const postBalances = txData.meta.postBalances;
+    const accountKeys = txData.transaction.message.accountKeys;
+    
+    if (preBalances && postBalances && accountKeys) {
+      // Find index of distribution wallet
+      const walletIndex = accountKeys.findIndex(key => 
+        key.pubkey === DISTRIBUTION_WALLET_ADDRESS
+      );
+      
+      if (walletIndex >= 0) {
+        const preBal = preBalances[walletIndex];
+        const postBal = postBalances[walletIndex];
+        const diff = postBal - preBal;
         
-        // Check if transaction already exists in the database
-        const existingTransaction = Transaction.findOne({ signature: sigData.signature });
-        if (existingTransaction) {
-          console.log(`Transaction ${sigData.signature} already exists, skipping`);
-          skipped++;
-          continue;
-        }
-        
-        const txDetails = await fetchTransactionDetails(sigData.signature);
-        if (!txDetails) {
-          console.log(`No transaction details found for ${sigData.signature}`);
-          continue;
-        }
-        
-        console.log(`Got transaction details for ${sigData.signature}, processing...`);
-        
-        // Create a simplified transaction object for processing
-        const simplifiedTx = {
-          signature: sigData.signature,
-          timestamp: txDetails.blockTime || (Date.now() / 1000), // Use blockTime or current time
-          feePayer: txDetails.transaction?.message?.accountKeys?.[0] || null,
-          tokenTransfers: [],
-          nativeTransfers: [],
-          accountData: []
-        };
-        
-        // Extract token transfers if available
-        if (txDetails.meta?.postTokenBalances && txDetails.meta?.preTokenBalances) {
-          const preBalances = txDetails.meta.preTokenBalances;
-          const postBalances = txDetails.meta.postTokenBalances;
+        if (diff > 0) {
+          // Received SOL
+          transaction.type = 'received';
+          transaction.amount = diff / 1e9; // Convert lamports to SOL
+          transaction.token = 'SOL';
+          transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
           
-          // Map account indices to addresses
-          const accountKeys = txDetails.transaction.message.accountKeys.map(key => 
-            typeof key === 'string' ? key : key.pubkey
+          // Try to determine sender
+          const senderIndex = preBalances.findIndex((bal, i) => 
+            i !== walletIndex && preBalances[i] > postBalances[i]
           );
+          if (senderIndex >= 0) {
+            transaction.sender = accountKeys[senderIndex].pubkey;
+          }
+        } else if (diff < 0) {
+          // Sent SOL
+          transaction.type = 'sent';
+          transaction.amount = Math.abs(diff) / 1e9; // Convert lamports to SOL
+          transaction.token = 'SOL';
+          transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
           
-          // Process token transfers
-          for (const postBalance of postBalances) {
-            const preBalance = preBalances.find(b => 
-              b.accountIndex === postBalance.accountIndex && 
-              b.mint === postBalance.mint
-            );
-            
-            if (preBalance) {
-              const preAmount = BigInt(preBalance.uiTokenAmount.amount || 0);
-              const postAmount = BigInt(postBalance.uiTokenAmount.amount || 0);
-              const diff = Number(postAmount - preAmount) / (10 ** (postBalance.uiTokenAmount.decimals || 0));
-              
-              if (diff !== 0) {
-                const accountAddress = accountKeys[postBalance.accountIndex];
-                
-                simplifiedTx.tokenTransfers.push({
-                  mint: postBalance.mint,
-                  fromUserAccount: diff < 0 ? accountAddress : null,
-                  toUserAccount: diff > 0 ? accountAddress : null,
-                  tokenAmount: Math.abs(diff)
-                });
-              }
-            }
+          // Try to determine receiver
+          const receiverIndex = preBalances.findIndex((bal, i) => 
+            i !== walletIndex && preBalances[i] < postBalances[i]
+          );
+          if (receiverIndex >= 0) {
+            transaction.receiver = accountKeys[receiverIndex].pubkey;
           }
         }
-        
-        // Extract SOL transfers if available
-        if (txDetails.meta?.preBalances && txDetails.meta?.postBalances) {
-          const preBalances = txDetails.meta.preBalances;
-          const postBalances = txDetails.meta.postBalances;
-          const accountKeys = txDetails.transaction.message.accountKeys.map(key => 
-            typeof key === 'string' ? key : key.pubkey
-          );
-          
-          for (let i = 0; i < preBalances.length; i++) {
-            const diff = postBalances[i] - preBalances[i];
-            if (diff !== 0) {
-              simplifiedTx.nativeTransfers.push({
-                fromUserAccount: diff < 0 ? accountKeys[i] : null,
-                toUserAccount: diff > 0 ? accountKeys[i] : null,
-                amount: Math.abs(diff)
-              });
-            }
-          }
-        }
-        
-        // Extract account data
-        if (txDetails.transaction?.message?.accountKeys) {
-          simplifiedTx.accountData = txDetails.transaction.message.accountKeys.map((key, index) => {
-            const address = typeof key === 'string' ? key : key.pubkey;
-            return {
-              account: address,
-              index
-            };
-          });
-        }
-        
-        console.log(`Simplified transaction: ${JSON.stringify(simplifiedTx, null, 2)}`);
-        
-        const result = await processTransaction(simplifiedTx);
-        if (result) {
-          processed++;
-          console.log(`Successfully processed transaction ${sigData.signature}`);
-        } else {
-          skipped++;
-          console.log(`Skipped transaction ${sigData.signature}`);
-        }
-      } catch (error) {
-        console.error(`Error processing signature ${sigData.signature}:`, error);
-        errors++;
-        // Continue with next transaction
       }
     }
     
-    console.log(`Processed ${processed} new transactions, skipped ${skipped}, errors ${errors}`);
-    return processed;
-  } catch (error) {
-    console.error('Error in fetchAndProcessTransactions:', error);
-    throw error;
-  }
-};
-
-// Initialize the service
-const init = async () => {
-  console.log('Initializing Helius service...');
-  
-  // Check for required environment variables
-  if (!process.env.HELIUS_API_KEY) {
-    console.error('HELIUS_API_KEY is not set in environment variables');
-    throw new Error('HELIUS_API_KEY is not set in environment variables');
-  }
-  
-  if (!process.env.DISTRIBUTION_WALLET_ADDRESS) {
-    console.error('DISTRIBUTION_WALLET_ADDRESS is not set in environment variables');
-    throw new Error('DISTRIBUTION_WALLET_ADDRESS is not set in environment variables');
-  }
-  
-  console.log('Helius service initialized');
-};
-
-// Get tax statistics (placeholder for API compatibility)
-const getTaxStats = async () => {
-  return {
-    totalSolDistributed: 0,
-    solBalance: 0
-  };
-};
-
-// Get SOL statistics (placeholder for API compatibility)
-const getSolStats = async () => {
-  return {
-    totalReceived: 0,
-    totalSent: 0,
-    balance: 0,
-    recentTransactions: []
-  };
-};
-
-// Get tax statistics
-const getTaxStatsFull = async () => {
-  try {
-    // Get total collected
-    const totalCollected = Transaction.aggregate([
-      { $match: { type: 'collection' } },
-      { $group: { _id: null, total: { $sum: 'tokenAmount' } } }
-    ]);
-    
-    // Get total distributed
-    const totalDistributed = Transaction.aggregate([
-      { $match: { type: 'distribution' } },
-      { $group: { _id: null, total: { $sum: 'tokenAmount' } } }
-    ]);
-    
-    // Get total SOL distributed
-    const totalSolDistributed = Transaction.aggregate([
-      { $match: { type: 'distribution', tokenMint: NATIVE_SOL_MINT } },
-      { $group: { _id: null, total: { $sum: 'solAmount' } } }
-    ]);
-    
-    // Get tax token stats if configured
-    let taxTokenStats = null;
-    if (TAX_TOKEN_MINT) {
-      const taxTokenCollected = Transaction.aggregate([
-        { $match: { type: 'collection', tokenMint: TAX_TOKEN_MINT } },
-        { $group: { _id: null, total: { $sum: 'tokenAmount' } } }
-      ]);
-      
-      const taxTokenDistributed = Transaction.aggregate([
-        { $match: { type: 'distribution', tokenMint: TAX_TOKEN_MINT } },
-        { $group: { _id: null, total: { $sum: 'tokenAmount' } } }
-      ]);
-      
-      taxTokenStats = {
-        tokenMint: TAX_TOKEN_MINT,
-        collected: taxTokenCollected[0]?.total || 0,
-        distributed: taxTokenDistributed[0]?.total || 0,
-        balance: (taxTokenCollected[0]?.total || 0) - (taxTokenDistributed[0]?.total || 0)
-      };
+    // If we couldn't determine the transaction type, mark as unknown
+    if (!transaction.type) {
+      transaction.type = 'unknown';
+      transaction.meta.raw = txData;
     }
     
-    // Get collection by token mint
-    const collectionByMint = Transaction.aggregate([
-      { $match: { type: 'collection' } },
-      { $group: { 
-          _id: 'tokenMint', 
-          total: { $sum: 'tokenAmount' },
-          count: { $count: 'tokenMint' }
-        } 
-      },
-      { $sort: { total: -1 } }
-    ]);
-    
-    // Get recent transactions
-    const recentTransactions = Transaction.find({ 
-      type: { $in: ['collection', 'distribution'] } 
-    }, { timestamp: -1 }, 10);
-    
-    // Sort transactions by timestamp (newest first)
-    const sortedRecentTransactions = recentTransactions.sort((a, b) => {
-      return new Date(b.timestamp) - new Date(a.timestamp);
-    });
-    
-    return {
-      totalCollected: totalCollected[0]?.total || 0,
-      totalDistributed: totalDistributed[0]?.total || 0,
-      totalSolDistributed: Math.abs(totalSolDistributed[0]?.total || 0),
-      balance: (totalCollected[0]?.total || 0) - (totalDistributed[0]?.total || 0),
-      taxTokenStats,
-      collectionByMint,
-      recentTransactions: sortedRecentTransactions
-    };
+    return transaction;
   } catch (error) {
-    console.error('Error getting tax stats:', error);
-    throw error;
+    console.error(`Error processing transaction ${signature}:`, error);
+    return null;
   }
-};
+}
 
-// Get stats for a specific token mint
-const getTokenMintStats = async (tokenMint) => {
+// Get transaction statistics
+async function getStats() {
   try {
-    // Get total collected for this mint
-    const totalCollected = Transaction.aggregate([
-      { $match: { type: 'collection', tokenMint } },
-      { $group: { _id: null, total: { $sum: 'tokenAmount' } } }
-    ]);
+    console.log('Getting transaction statistics...');
     
-    // Get total distributed for this mint
-    const totalDistributed = Transaction.aggregate([
-      { $match: { type: 'distribution', tokenMint } },
-      { $group: { _id: null, total: { $sum: 'tokenAmount' } } }
-    ]);
+    // Get all transactions
+    const allTransactions = await Transaction.getAll();
     
-    // Get recent transactions for this mint
-    const recentTransactions = Transaction.find({ 
-      tokenMint,
-      type: { $in: ['collection', 'distribution'] } 
-    }, { timestamp: -1 }, 10);
+    // Calculate statistics
+    const stats = {
+      totalTransactions: allTransactions.length,
+      transactionsByType: {},
+      transactionsByToken: {},
+      totalAmountByToken: {}
+    };
     
-    // Sort transactions by timestamp (newest first)
-    const sortedRecentTransactions = recentTransactions.sort((a, b) => {
-      return new Date(b.timestamp) - new Date(a.timestamp);
-    });
+    // Process each transaction
+    for (const tx of allTransactions) {
+      // Count by type
+      stats.transactionsByType[tx.type] = (stats.transactionsByType[tx.type] || 0) + 1;
+      
+      // Count by token
+      stats.transactionsByToken[tx.token] = (stats.transactionsByToken[tx.token] || 0) + 1;
+      
+      // Sum amount by token
+      if (tx.amount) {
+        stats.totalAmountByToken[tx.token] = (stats.totalAmountByToken[tx.token] || 0) + tx.amount;
+      }
+    }
     
-    // Check if this is the tax token
-    const isTaxToken = tokenMint === TAX_TOKEN_MINT;
+    return stats;
+  } catch (error) {
+    console.error('Error getting transaction statistics:', error);
+    return {
+      totalTransactions: 0,
+      transactionsByType: {},
+      transactionsByToken: {},
+      totalAmountByToken: {}
+    };
+  }
+}
+
+// Get tax statistics
+async function getTaxStats() {
+  try {
+    const allTransactions = await Transaction.find().exec();
+    
+    const collected = allTransactions.filter(tx => tx.type === 'collection');
+    const distributed = allTransactions.filter(tx => tx.type === 'distribution');
+    
+    const totalCollected = collected.reduce((sum, tx) => sum + tx.amount, 0);
+    const totalDistributed = distributed.reduce((sum, tx) => sum + tx.amount, 0);
     
     return {
-      tokenMint,
-      isTaxToken,
-      totalCollected: totalCollected[0]?.total || 0,
-      totalDistributed: totalDistributed[0]?.total || 0,
-      balance: (totalCollected[0]?.total || 0) - (totalDistributed[0]?.total || 0),
-      recentTransactions: sortedRecentTransactions
+      totalCollected,
+      totalDistributed,
+      balance: totalCollected - totalDistributed,
+      collectionCount: collected.length,
+      distributionCount: distributed.length,
+      lastUpdated: new Date().toISOString()
     };
   } catch (error) {
-    console.error(`Error getting stats for token mint ${tokenMint}:`, error);
+    console.error('Error getting tax stats:', error.message);
     throw error;
   }
-};
+}
 
 // Get tax token statistics
-const getTaxTokenStats = async () => {
-  if (!TAX_TOKEN_MINT) {
-    throw new Error('TAX_TOKEN_MINT_ADDRESS is not set in environment variables');
+async function getTaxTokenStats() {
+  try {
+    if (!TAX_TOKEN_MINT_ADDRESS) {
+      throw new Error('TAX_TOKEN_MINT_ADDRESS is not set in environment variables');
+    }
+    
+    const taxTokenTxs = await Transaction.find({ token: TAX_TOKEN_MINT_ADDRESS }).exec();
+    
+    const collected = taxTokenTxs.filter(tx => tx.type === 'collection');
+    const distributed = taxTokenTxs.filter(tx => tx.type === 'distribution');
+    
+    const totalCollected = collected.reduce((sum, tx) => sum + tx.amount, 0);
+    const totalDistributed = distributed.reduce((sum, tx) => sum + tx.amount, 0);
+    
+    return {
+      token: TAX_TOKEN_MINT_ADDRESS,
+      totalCollected,
+      totalDistributed,
+      balance: totalCollected - totalDistributed,
+      collectionCount: collected.length,
+      distributionCount: distributed.length,
+      lastUpdated: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('Error getting tax token stats:', error.message);
+    throw error;
   }
-  
-  return getTokenMintStats(TAX_TOKEN_MINT);
-};
+}
 
-// Format number with commas and decimal places
-const formatNumber = (num, decimals = 7) => {  // Changed from 6 to 7 decimals
-  return num.toLocaleString('en-US', {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals
-  });
-};
+// Get token mint statistics
+async function getTokenMintStats(tokenMint) {
+  try {
+    const tokenTxs = await Transaction.find({ token: tokenMint }).exec();
+    
+    const collected = tokenTxs.filter(tx => tx.type === 'collection');
+    const distributed = tokenTxs.filter(tx => tx.type === 'distribution');
+    
+    const totalCollected = collected.reduce((sum, tx) => sum + tx.amount, 0);
+    const totalDistributed = distributed.reduce((sum, tx) => sum + tx.amount, 0);
+    
+    return {
+      tokenMint,
+      totalCollected,
+      totalDistributed,
+      balance: totalCollected - totalDistributed,
+      collectionCount: collected.length,
+      distributionCount: distributed.length,
+      lastUpdated: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error(`Error getting stats for token mint ${tokenMint}:`, error.message);
+    throw error;
+  }
+}
 
+// Get SOL statistics
+async function getSolStats() {
+  return getTokenMintStats(NATIVE_SOL_MINT);
+}
+
+// Export functions
 module.exports = {
-  fetchAndProcessTransactions,
-  getTaxStats,
-  getTokenMintStats,
-  getTaxTokenStats,
-  getSolStats,
+  initialize,
   fetchTransactions,
-  fetchTransactionDetails,
-  NATIVE_SOL_MINT,
-  TAX_TOKEN_MINT,
-  init,
-  getTaxStatsFull
+  getTransactionDetails,
+  getStats,
+  getTaxStats,
+  getTaxTokenStats,
+  getTokenMintStats,
+  getSolStats
 }; 
