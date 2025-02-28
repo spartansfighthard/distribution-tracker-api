@@ -229,7 +229,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 10) {
+async function fetchTransactionsVercel(limit = 20) {
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -246,7 +246,9 @@ async function fetchTransactionsVercel(limit = 10) {
       params: [
         DISTRIBUTION_WALLET_ADDRESS,
         {
-          limit: limit
+          limit: limit,
+          before: null, // Fetch from the most recent
+          until: null   // No end point
         }
       ]
     };
@@ -776,7 +778,7 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
       // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(10);
+      const fetchedTransactions = await fetchTransactionsVercel(20);
       
       // Calculate basic statistics
       const stats = {
@@ -807,9 +809,11 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         environment: process.env.NODE_ENV || 'development',
         vercel: true,
         note: "Running in optimized mode for Vercel serverless environment",
+        serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
         stats: {
           ...stats,
-          recentTransactions: fetchedTransactions
+          recentTransactions: fetchedTransactions,
+          fetchedAt: new Date().toISOString()
         }
       });
     }
@@ -864,7 +868,7 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(10);
+    const fetchedTransactions = await fetchTransactionsVercel(20);
     
     // Get transactions with type 'sent'
     const sentTransactions = fetchedTransactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
@@ -892,7 +896,9 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
       note: "Running in optimized mode for Vercel serverless environment",
-      stats
+      serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
+      stats,
+      fetchedAt: new Date().toISOString()
     });
   }
   
@@ -945,7 +951,7 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
   // For Vercel, use a simplified approach
   if (process.env.VERCEL) {
     // Fetch a minimal set of transactions
-    const fetchedTransactions = await fetchTransactionsVercel(10);
+    const fetchedTransactions = await fetchTransactionsVercel(20);
     
     // Get transactions for SOL
     const solTransactions = fetchedTransactions.filter(tx => tx.token === 'SOL');
@@ -981,7 +987,9 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
       note: "Running in optimized mode for Vercel serverless environment",
-      stats
+      serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
+      stats,
+      fetchedAt: new Date().toISOString()
     });
   }
   
@@ -1043,7 +1051,7 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
       // Fetch a minimal set of transactions
-      const fetchedTransactions = await fetchTransactionsVercel(10);
+      const fetchedTransactions = await fetchTransactionsVercel(20);
       
       // Return simplified response
       return res.json({
@@ -1052,9 +1060,11 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
         environment: process.env.NODE_ENV || 'development',
         vercel: true,
         note: "Running in optimized mode for Vercel serverless environment",
+        serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
         message: 'Fetched transaction data with details',
         count: fetchedTransactions.length,
-        recentTransactions: fetchedTransactions
+        recentTransactions: fetchedTransactions,
+        fetchedAt: new Date().toISOString()
       });
     }
     
