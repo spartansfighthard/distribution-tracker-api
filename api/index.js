@@ -1088,38 +1088,39 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         }
       }
       
-      // Get transactions with type 'sent' from ALL stored transactions
-      const sentTransactions = transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
+      // Calculate statistics from ALL stored transactions
+      const solTransactions = transactions.filter(tx => tx.token === 'SOL');
+      const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
+      const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
       
-      // Calculate distribution statistics
-      const stats = {
-        totalTransactions: sentTransactions.length,
-        totalDistributed: sentTransactions.reduce((sum, tx) => sum + tx.amount, 0),
-        averageDistribution: sentTransactions.length > 0 
-          ? sentTransactions.reduce((sum, tx) => sum + tx.amount, 0) / sentTransactions.length 
-          : 0,
-        largestDistribution: sentTransactions.length > 0 
-          ? Math.max(...sentTransactions.map(tx => tx.amount)) 
-          : 0,
-        smallestDistribution: sentTransactions.length > 0 
-          ? Math.min(...sentTransactions.map(tx => tx.amount)) 
-          : 0,
-        recentDistributions: sentTransactions.slice(0, 5)
+      const totalSent = sentTransactions.reduce((sum, tx) => sum + tx.amount, 0);
+      const totalReceived = receivedTransactions.reduce((sum, tx) => sum + tx.amount, 0);
+      const currentBalance = totalReceived - totalSent;
+      
+      // Format the statistics in the requested format
+      const formattedStats = {
+        title: "📊 SOL Statistics 📊",
+        totalSolDistributed: totalSent.toFixed(7),
+        totalSolReceived: totalReceived.toFixed(7),
+        currentSolBalance: currentBalance.toFixed(7),
+        totalTransactions: transactions.length,
+        distributionWallet: DISTRIBUTION_WALLET_ADDRESS,
+        solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
       };
       
-      // Return simplified statistics
+      // Return statistics
       return res.json({
         success: true,
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
         vercel: true,
         note: "Running in optimized mode for Vercel serverless environment",
-        stats: {
-          ...stats,
+        stats: formattedStats,
+        rawStats: {
           totalStoredTransactions: transactions.length,
           displayedTransactions: fetchedTransactions.length,
-          recentTransactions: fetchedTransactions.slice(0, 10),
-          allTransactions: transactions.filter(tx => tx.token === 'SOL')
+          recentTransactions: solTransactions.slice(0, 10),
+          allTransactions: solTransactions
         },
         fetchedAt: new Date().toISOString()
       });
@@ -1198,34 +1199,42 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
     const sentTransactions = transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
     
     // Calculate distribution statistics
-    const stats = {
-      totalTransactions: sentTransactions.length,
-      totalDistributed: sentTransactions.reduce((sum, tx) => sum + tx.amount, 0),
-      averageDistribution: sentTransactions.length > 0 
-        ? sentTransactions.reduce((sum, tx) => sum + tx.amount, 0) / sentTransactions.length 
-        : 0,
-      largestDistribution: sentTransactions.length > 0 
-        ? Math.max(...sentTransactions.map(tx => tx.amount)) 
-        : 0,
-      smallestDistribution: sentTransactions.length > 0 
-        ? Math.min(...sentTransactions.map(tx => tx.amount)) 
-        : 0,
-      recentDistributions: sentTransactions.slice(0, 5)
+    const totalDistributed = sentTransactions.reduce((sum, tx) => sum + tx.amount, 0);
+    const averageDistribution = sentTransactions.length > 0 
+      ? totalDistributed / sentTransactions.length 
+      : 0;
+    const largestDistribution = sentTransactions.length > 0 
+      ? Math.max(...sentTransactions.map(tx => tx.amount)) 
+      : 0;
+    const smallestDistribution = sentTransactions.length > 0 
+      ? Math.min(...sentTransactions.map(tx => tx.amount)) 
+      : 0;
+    
+    // Format the statistics in the requested format
+    const formattedStats = {
+      title: "💸 SOL Distribution Data 💸",
+      totalSolDistributed: totalDistributed.toFixed(7),
+      totalDistributions: sentTransactions.length,
+      averageDistribution: averageDistribution.toFixed(7),
+      largestDistribution: largestDistribution.toFixed(7),
+      smallestDistribution: smallestDistribution.toFixed(7),
+      distributionWallet: DISTRIBUTION_WALLET_ADDRESS,
+      solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
     };
     
-    // Return simplified statistics
+    // Return statistics
     return res.json({
       success: true,
       timestamp: new Date().toISOString(),
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
       note: "Running in optimized mode for Vercel serverless environment",
-      stats: {
-        ...stats,
+      stats: formattedStats,
+      distributions: {
         totalStoredTransactions: transactions.length,
-        displayedTransactions: fetchedTransactions.length,
+        totalDistributions: sentTransactions.length,
         recentDistributions: sentTransactions.slice(0, 10),
-        allDistributions: transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL')
+        allDistributions: sentTransactions
       },
       fetchedAt: new Date().toISOString()
     });
@@ -1306,24 +1315,21 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
     const received = solTransactions.filter(tx => tx.type === 'received');
     const sent = solTransactions.filter(tx => tx.type === 'sent');
     
-    const stats = {
+    const totalReceived = received.reduce((sum, tx) => sum + tx.amount, 0);
+    const totalSent = sent.reduce((sum, tx) => sum + tx.amount, 0);
+    const currentBalance = totalReceived - totalSent;
+    
+    // Format the statistics in the requested format
+    const formattedStats = {
+      title: "🔍 Detailed SOL Transfer Statistics 🔍",
+      totalSolDistributed: totalSent.toFixed(7),
+      totalSolReceived: totalReceived.toFixed(7),
+      currentSolBalance: currentBalance.toFixed(7),
       totalTransactions: solTransactions.length,
-      received: {
-        count: received.length,
-        total: received.reduce((sum, tx) => sum + tx.amount, 0),
-        average: received.length > 0 
-          ? received.reduce((sum, tx) => sum + tx.amount, 0) / received.length 
-          : 0
-      },
-      sent: {
-        count: sent.length,
-        total: sent.reduce((sum, tx) => sum + tx.amount, 0),
-        average: sent.length > 0 
-          ? sent.reduce((sum, tx) => sum + tx.amount, 0) / sent.length 
-          : 0
-      },
-      balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0),
-      recentTransactions: solTransactions.slice(0, 5)
+      receivedTransactions: received.length,
+      sentTransactions: sent.length,
+      distributionWallet: DISTRIBUTION_WALLET_ADDRESS,
+      solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
     };
     
     // Return statistics
@@ -1333,12 +1339,14 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
       note: "Running in optimized mode for Vercel serverless environment",
-      stats: {
-        ...stats,
+      stats: formattedStats,
+      transactions: {
         totalStoredTransactions: transactions.length,
-        displayedTransactions: solTransactions.length,
+        totalSolTransactions: solTransactions.length,
         recentTransactions: solTransactions.slice(0, 10),
-        allTransactions: transactions.filter(tx => tx.token === 'SOL')
+        allTransactions: solTransactions,
+        receivedTransactions: received,
+        sentTransactions: sent
       },
       fetchedAt: new Date().toISOString()
     });
