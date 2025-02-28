@@ -17,7 +17,7 @@ const STORAGE_CONFIG = {
   storageKey: 'transactions_data',
   blobStoragePath: 'transactions/data.json',
   maxStoredTransactions: 10000, // Store up to 10,000 transactions
-  storageInterval: 10 * 1000, // How often to save data (10 seconds)
+  storageInterval: 5 * 1000, // How often to save data (5 seconds)
   lastStorageTime: null
 };
 
@@ -245,31 +245,43 @@ const storage = {
         // Always try Blob storage in Vercel
         try {
           console.log('Attempting to load from Vercel Blob storage...');
+          // Import the Vercel Blob SDK properly
           const { list, get } = await import('@vercel/blob');
           
           // List blobs to check if our data exists
           const blobs = await list();
           console.log('Available blobs:', blobs);
           
-          // Try to get our data blob
-          try {
-            const blob = await get(STORAGE_CONFIG.blobStoragePath);
-            
-            if (blob) {
-              const text = await blob.text();
-              const storedData = JSON.parse(text);
-              
-              if (storedData.transactions && Array.isArray(storedData.transactions)) {
-                // Clear existing transactions and add loaded ones
-                transactions.length = 0;
-                transactions.push(...storedData.transactions);
-                lastFetchTimestamp = storedData.lastFetchTimestamp || new Date().toISOString();
-                console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
-                return true;
+          // Find our data blob in the list
+          const dataBlob = blobs.blobs.find(blob => 
+            blob.pathname === STORAGE_CONFIG.blobStoragePath
+          );
+          
+          if (dataBlob) {
+            console.log(`Found data blob: ${dataBlob.pathname}`);
+            // Get the blob content using the URL
+            const response = await fetch(dataBlob.url);
+            if (response.ok) {
+              const text = await response.text();
+              try {
+                const storedData = JSON.parse(text);
+                
+                if (storedData.transactions && Array.isArray(storedData.transactions)) {
+                  // Clear existing transactions and add loaded ones
+                  transactions.length = 0;
+                  transactions.push(...storedData.transactions);
+                  lastFetchTimestamp = storedData.lastFetchTimestamp || new Date().toISOString();
+                  console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
+                  return true;
+                }
+              } catch (parseError) {
+                console.error('Error parsing JSON from blob:', parseError);
               }
+            } else {
+              console.error(`Failed to fetch blob: ${response.status} ${response.statusText}`);
             }
-          } catch (getBlobError) {
-            console.log('Blob not found or error getting blob:', getBlobError.message);
+          } else {
+            console.log('Blob not found in the list');
           }
         } catch (blobError) {
           console.error('Error loading from Vercel Blob:', blobError);
@@ -334,7 +346,7 @@ const storage = {
       if (process.env.VERCEL) {
         // Always use Blob storage in Vercel
         try {
-          console.log('Attempting to save to Vercel Blob storage...');
+          console.log(`Attempting to save ${transactionsToStore.length} transactions to Vercel Blob storage...`);
           const { put } = await import('@vercel/blob');
           
           // Convert data to JSON string
@@ -2015,3 +2027,41 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Export for Vercel serverless deployment
 module.exports = app; 
+
+// Add a new endpoint to force save to Blob storage
+app.get('/api/force-save', asyncHandler(async (req, res) => {
+  console.log('Forcing save to Blob storage...');
+  
+  try {
+    // Temporarily bypass the storage interval check
+    const originalInterval = STORAGE_CONFIG.storageInterval;
+    STORAGE_CONFIG.storageInterval = 0;
+    STORAGE_CONFIG.lastStorageTime = null;
+    
+    // Force save
+    const saveResult = await storage.save();
+    
+    // Restore original interval
+    STORAGE_CONFIG.storageInterval = originalInterval;
+    
+    // Return response
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      message: saveResult ? 'Successfully forced save to Blob storage' : 'Failed to save to Blob storage',
+      transactionCount: transactions.length,
+      savedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error in /api/force-save:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to force save to Blob storage',
+        details: error.message
+      }
+    });
+  }
+}));
