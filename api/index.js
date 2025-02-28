@@ -10,63 +10,97 @@ const { setTimeout } = require('timers/promises');
 const CONFIG = {
   // API rate limiting
   rateLimits: {
-    requestsPerSecond: 2,       // Maximum requests per second to Helius API
-    retryDelay: 2000,           // Base delay in ms when hitting rate limits
-    maxRetries: 3,              // Maximum number of retries for failed requests
-    batchSize: 5,               // Number of transactions to process in each batch
-    batchDelay: 2000,           // Delay between processing batches in ms
+    requestsPerSecond: 1,       // Reduced from 2 to 1 request per second
+    retryDelay: 5000,           // Increased from 2000 to 5000ms
+    maxRetries: 5,              // Increased from 3 to 5 retries
+    batchSize: 3,               // Reduced from 5 to 3 transactions per batch
+    batchDelay: 5000,           // Increased from 2000 to 5000ms
+    initialBackoff: 10000,      // Initial backoff time when hitting rate limits
   },
   // Transaction fetching
   transactions: {
-    maxTransactionsToFetch: 100, // Maximum number of transactions to fetch at once
+    maxTransactionsToFetch: 50, // Reduced from 100 to 50 transactions
     cacheExpiration: 5 * 60 * 1000, // Cache expiration time in ms (5 minutes)
   }
 };
 
-// Rate limiter utility
+// Rate limiter utility with proper queue
 class RateLimiter {
   constructor(requestsPerSecond = CONFIG.rateLimits.requestsPerSecond) {
     this.requestsPerSecond = requestsPerSecond;
     this.queue = [];
     this.processing = false;
     this.lastRequestTime = 0;
+    this.consecutiveErrors = 0;
   }
 
   async throttle() {
     const now = Date.now();
-    const timeToWait = Math.max(0, 1000 / this.requestsPerSecond - (now - this.lastRequestTime));
+    // Add extra delay if we've had consecutive errors
+    const extraDelay = this.consecutiveErrors * 1000; // 1 second per consecutive error
+    const timeToWait = Math.max(0, (1000 / this.requestsPerSecond) - (now - this.lastRequestTime)) + extraDelay;
     
     if (timeToWait > 0) {
-      console.log(`Rate limiting: waiting ${timeToWait}ms before next request`);
+      console.log(`Rate limiting: waiting ${timeToWait}ms before next request (consecutive errors: ${this.consecutiveErrors})`);
       await setTimeout(timeToWait);
     }
     
     this.lastRequestTime = Date.now();
   }
 
-  async sendRequest(requestFn) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        await this.throttle();
-        const result = await requestFn();
-        resolve(result);
-      } catch (error) {
-        // If we hit a rate limit, wait longer and retry
-        if (error.response && error.response.status === 429) {
-          console.log(`Rate limit hit, waiting ${CONFIG.rateLimits.retryDelay}ms before retrying...`);
-          await setTimeout(CONFIG.rateLimits.retryDelay);
-          try {
-            await this.throttle();
-            const result = await requestFn();
-            resolve(result);
-          } catch (retryError) {
-            reject(retryError);
-          }
-        } else {
-          reject(error);
-        }
+  // Add request to queue and process
+  async enqueue(requestFn) {
+    return new Promise((resolve, reject) => {
+      // Add to queue
+      this.queue.push({ requestFn, resolve, reject });
+      
+      // Start processing if not already
+      if (!this.processing) {
+        this.processQueue();
       }
     });
+  }
+
+  // Process queue
+  async processQueue() {
+    if (this.queue.length === 0) {
+      this.processing = false;
+      return;
+    }
+
+    this.processing = true;
+    const { requestFn, resolve, reject } = this.queue.shift();
+
+    try {
+      await this.throttle();
+      const result = await requestFn();
+      // Reset consecutive errors on success
+      this.consecutiveErrors = 0;
+      resolve(result);
+    } catch (error) {
+      // Increment consecutive errors
+      this.consecutiveErrors++;
+      
+      // If we hit a rate limit, wait longer and retry
+      if (error.response && error.response.status === 429) {
+        const waitTime = CONFIG.rateLimits.initialBackoff * Math.pow(2, this.consecutiveErrors - 1);
+        console.log(`Rate limit hit, waiting ${waitTime}ms before continuing (consecutive errors: ${this.consecutiveErrors})...`);
+        await setTimeout(waitTime);
+        
+        // Put the request back at the front of the queue
+        this.queue.unshift({ requestFn, resolve, reject });
+      } else {
+        reject(error);
+      }
+    } finally {
+      // Continue processing queue after a delay
+      setTimeout(() => this.processQueue(), 500);
+    }
+  }
+
+  // Send request through the queue
+  async sendRequest(requestFn) {
+    return this.enqueue(requestFn);
   }
 }
 
@@ -198,28 +232,41 @@ async function fetchTransactions() {
     );
     console.log(`Found ${newSignatures.length} new signatures to process`);
     
-    // Process signatures in batches to avoid overwhelming the API
+    // Process signatures in smaller batches with longer delays
     const batchSize = CONFIG.rateLimits.batchSize;
     const newTransactions = [];
     
-    for (let i = 0; i < newSignatures.length; i += batchSize) {
-      console.log(`Processing batch ${Math.floor(i/batchSize) + 1} of ${Math.ceil(newSignatures.length/batchSize)}`);
+    // Only process a limited number of signatures to avoid overwhelming the API
+    const maxSignaturesToProcess = Math.min(newSignatures.length, 20);
+    const signaturesToProcess = newSignatures.slice(0, maxSignaturesToProcess);
+    
+    if (signaturesToProcess.length < newSignatures.length) {
+      console.log(`Limiting processing to ${maxSignaturesToProcess} signatures out of ${newSignatures.length} to avoid rate limits`);
+    }
+    
+    for (let i = 0; i < signaturesToProcess.length; i += batchSize) {
+      console.log(`Processing batch ${Math.floor(i/batchSize) + 1} of ${Math.ceil(signaturesToProcess.length/batchSize)}`);
       
-      const batch = newSignatures.slice(i, i + batchSize);
-      const batchPromises = batch.map(sig => getTransactionDetails(sig.signature));
+      const batch = signaturesToProcess.slice(i, i + batchSize);
       
-      // Wait for all transactions in the batch to be processed
-      const batchResults = await Promise.allSettled(batchPromises);
+      // Process one signature at a time to better control rate limiting
+      for (const sig of batch) {
+        try {
+          const txDetails = await getTransactionDetails(sig.signature);
+          if (txDetails) {
+            newTransactions.push(txDetails);
+          }
+          // Add a small delay between each signature in the batch
+          await setTimeout(1000);
+        } catch (error) {
+          console.error(`Error processing signature ${sig.signature}:`, error.message);
+          // Continue with next signature
+          continue;
+        }
+      }
       
-      // Filter out failed promises and add successful ones to our transactions list
-      const successfulTransactions = batchResults
-        .filter(result => result.status === 'fulfilled' && result.value)
-        .map(result => result.value);
-      
-      newTransactions.push(...successfulTransactions);
-      
-      // Add a delay between batches to avoid overwhelming the API
-      if (i + batchSize < newSignatures.length) {
+      // Add a longer delay between batches
+      if (i + batchSize < signaturesToProcess.length) {
         console.log(`Waiting ${CONFIG.rateLimits.batchDelay}ms between batches to respect rate limits...`);
         await setTimeout(CONFIG.rateLimits.batchDelay);
       }
@@ -293,8 +340,8 @@ async function getTransactionDetails(signature) {
         await setTimeout(waitTime);
       } else if (retries <= maxRetries) {
         // For other errors, wait a bit less before retrying
-        console.log(`Error fetching transaction, retrying in 1000ms (attempt ${retries}/${maxRetries})...`);
-        await setTimeout(1000);
+        console.log(`Error fetching transaction, retrying in 2000ms (attempt ${retries}/${maxRetries})...`);
+        await setTimeout(2000);
       } else {
         // We've exhausted our retries
         console.error(`Error getting transaction details for ${signature} after ${maxRetries} retries:`, error.message);
