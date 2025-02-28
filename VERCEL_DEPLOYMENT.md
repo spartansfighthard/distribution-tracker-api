@@ -5,65 +5,73 @@ This guide will walk you through the process of deploying your SOL Distribution 
 ## Prerequisites
 
 1. A [Vercel](https://vercel.com) account
-2. [Vercel CLI](https://vercel.com/docs/cli) installed (optional, for local testing)
-3. Your Helius API key
-4. Your distribution wallet address
-5. Your tax contract address (optional)
+2. Your GitHub repository set up with the code
 
-## Deployment Steps
-
-### 1. Prepare Your Repository
-
-Make sure your repository contains the following files:
-- `api/index.js` - The serverless API entry point
-- `vercel.json` - Vercel configuration file
-- `package.json` - Dependencies and project configuration
-- `src/services/transactionService.js` - Transaction service with in-memory caching
-- `src/services/heliusService.js` - Simplified Helius service
-
-### 2. Set Up Environment Variables in Vercel
+## Environment Variables
 
 You'll need to set up the following environment variables in your Vercel project:
 
-1. Log in to your Vercel account and go to your project
-2. Navigate to the "Settings" tab
-3. Click on "Environment Variables"
-4. Add the following variables:
-   - `HELIUS_API_KEY` - Your Helius API key
-   - `DISTRIBUTION_WALLET_ADDRESS` - Your distribution wallet address
-   - `TAX_CONTRACT_ADDRESS` - Your tax contract address (optional)
+- `HELIUS_API_KEY`: Your Helius API key (currently: f293a327-e829-4c21-be96-224e219cbffe)
+- `HELIUS_RPC_URL`: Your Helius RPC URL (currently: https://mainnet.helius-rpc.com/?api-key=f293a327-e829-4c21-be96-224e219cbffe)
+- `DISTRIBUTION_WALLET_ADDRESS`: Your distribution wallet address (currently: HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv)
+- `TAX_CONTRACT_ADDRESS`: Your tax contract address (if applicable)
 
-### 3. Deploy to Vercel
+Note: The Telegram bot token and MongoDB URI are not needed for the API deployment on Vercel.
 
-#### Option 1: Deploy via Vercel Dashboard
+## Deployment Steps
 
-1. Connect your GitHub, GitLab, or Bitbucket repository to Vercel
-2. Configure the project settings:
-   - Build Command: Leave empty (uses default)
-   - Output Directory: Leave empty (uses default)
-   - Install Command: `npm install`
-3. Click "Deploy"
+### 1. Push Your Code to GitHub
+
+Make sure all your code is committed and pushed to your GitHub repository:
+
+```powershell
+git add .
+git commit -m "Prepare for Vercel deployment"
+git push origin main
+```
+
+### 2. Deploy to Vercel
+
+#### Option 1: Deploy via Vercel Dashboard (Recommended)
+
+1. Go to [Vercel](https://vercel.com/) and sign in
+2. Click "Add New..." → "Project"
+3. Import your GitHub repository (`spartansfighthard/distribution-tracker-api`)
+4. Configure your project:
+   - **Framework Preset**: Select "Other" or "Node.js"
+   - **Root Directory**: Leave as `.` (the project root)
+   - **Build Command**: Leave blank (uses the default from vercel.json)
+   - **Output Directory**: Leave blank (uses the default)
+
+5. Add Environment Variables:
+   - Click "Environment Variables"
+   - Add each of the variables listed in the "Environment Variables" section above
+   - Make sure to copy the values exactly from your local `.env` file
+
+6. Click "Deploy"
 
 #### Option 2: Deploy via Vercel CLI
 
-1. Install Vercel CLI if you haven't already:
-   ```
-   npm install -g vercel
+If you prefer using the command line:
+
+1. Install Vercel CLI:
+   ```powershell
+   npm i -g vercel
    ```
 
 2. Log in to Vercel:
-   ```
+   ```powershell
    vercel login
    ```
 
-3. Deploy from your project directory:
-   ```
+3. Deploy your project:
+   ```powershell
    vercel
    ```
 
-4. Follow the prompts to configure your project
+4. Follow the interactive prompts and add your environment variables when asked
 
-### 4. Test Your Deployment
+### 3. Test Your Deployment
 
 Once deployed, Vercel will provide you with a URL for your API. Test it by accessing:
 
@@ -71,24 +79,12 @@ Once deployed, Vercel will provide you with a URL for your API. Test it by acces
 https://your-vercel-url.vercel.app/api/health
 ```
 
-You should see a response like:
-```json
-{
-  "success": true,
-  "timestamp": "2023-06-01T12:00:00.000Z",
-  "message": "API is running",
-  "version": "1.0.0"
-}
-```
+You should see a response indicating that the API is running.
 
-### 5. Connect Your Website to the API
-
-Update your React dashboard component to use your Vercel API URL:
-
-```jsx
-// In your React project
-const API_BASE_URL = 'https://your-vercel-url.vercel.app/api';
-```
+Then test the other endpoints:
+- `https://your-vercel-url.vercel.app/api/stats`
+- `https://your-vercel-url.vercel.app/api/distributions`
+- `https://your-vercel-url.vercel.app/api/tax`
 
 ## Troubleshooting
 
@@ -102,11 +98,7 @@ If you experience timeouts, it might be because Vercel serverless functions have
 
 ### CORS Issues
 
-If you encounter CORS issues when accessing the API from your website, check:
-
-1. The CORS configuration in `api/index.js`
-2. Your browser's console for specific error messages
-3. That your website's domain is properly configured in the CORS settings
+If you encounter CORS issues when accessing the API from your website, check the CORS configuration in `api/index.js`. Your current configuration allows all origins, which is fine for development but might need to be restricted in production.
 
 ### Memory Limitations
 
@@ -124,6 +116,7 @@ For a production deployment, consider:
 2. Implementing proper authentication for sensitive endpoints
 3. Setting up monitoring and alerts
 4. Implementing rate limiting to prevent abuse
+5. Securing your environment variables (don't share your API keys publicly)
 
 ## Updating Your Deployment
 

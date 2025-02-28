@@ -1,9 +1,7 @@
 // File storage service with in-memory fallback for Vercel
 const fs = require('fs').promises;
 const path = require('path');
-
-// In-memory storage for Vercel environment
-const memoryStorage = {};
+const { connectToDatabase } = require('../utils/mongodb');
 
 // Check if we're in Vercel environment
 const isVercel = process.env.VERCEL === '1' || process.env.VERCEL === 'true';
@@ -15,7 +13,9 @@ const DATA_DIR = isVercel ? null : path.join(process.cwd(), 'data');
 async function initialize() {
   try {
     if (isVercel) {
-      console.log('Running in Vercel environment, using in-memory storage');
+      console.log('Running in Vercel environment, using MongoDB storage');
+      // Test MongoDB connection
+      await connectToDatabase();
       return true;
     }
     
@@ -39,13 +39,18 @@ async function initialize() {
   }
 }
 
-// Read data from file or memory
+// Read data from file or MongoDB
 async function readData(filename) {
   try {
-    // Use in-memory storage in Vercel
+    // Use MongoDB in Vercel
     if (isVercel) {
-      console.log(`Reading data from memory: ${filename}`);
-      return memoryStorage[filename] || null;
+      console.log(`Reading data from MongoDB: ${filename}`);
+      
+      const { db } = await connectToDatabase();
+      const collection = db.collection('metadata');
+      
+      const doc = await collection.findOne({ key: filename });
+      return doc ? doc.value : null;
     }
     
     // Use file storage in local environment
@@ -68,13 +73,22 @@ async function readData(filename) {
   }
 }
 
-// Write data to file or memory
+// Write data to file or MongoDB
 async function writeData(filename, data) {
   try {
-    // Use in-memory storage in Vercel
+    // Use MongoDB in Vercel
     if (isVercel) {
-      console.log(`Writing data to memory: ${filename}`);
-      memoryStorage[filename] = data;
+      console.log(`Writing data to MongoDB: ${filename}`);
+      
+      const { db } = await connectToDatabase();
+      const collection = db.collection('metadata');
+      
+      await collection.updateOne(
+        { key: filename },
+        { $set: { value: data } },
+        { upsert: true }
+      );
+      
       return true;
     }
     
@@ -90,13 +104,17 @@ async function writeData(filename, data) {
   }
 }
 
-// Delete data from file or memory
+// Delete data from file or MongoDB
 async function deleteData(filename) {
   try {
-    // Use in-memory storage in Vercel
+    // Use MongoDB in Vercel
     if (isVercel) {
-      console.log(`Deleting data from memory: ${filename}`);
-      delete memoryStorage[filename];
+      console.log(`Deleting data from MongoDB: ${filename}`);
+      
+      const { db } = await connectToDatabase();
+      const collection = db.collection('metadata');
+      
+      await collection.deleteOne({ key: filename });
       return true;
     }
     
@@ -123,10 +141,15 @@ async function deleteData(filename) {
 // List all data files
 async function listData() {
   try {
-    // Use in-memory storage in Vercel
+    // Use MongoDB in Vercel
     if (isVercel) {
-      console.log('Listing data from memory');
-      return Object.keys(memoryStorage);
+      console.log('Listing data from MongoDB');
+      
+      const { db } = await connectToDatabase();
+      const collection = db.collection('metadata');
+      
+      const docs = await collection.find({}).toArray();
+      return docs.map(doc => doc.key);
     }
     
     // Use file storage in local environment
