@@ -1,6 +1,4 @@
-// In-memory transaction storage for Vercel environment
-const transactions = [];
-let lastFetchTimestamp = null;
+const { connectToDatabase } = require('../utils/mongodb');
 
 class Transaction {
   constructor(data) {
@@ -19,19 +17,25 @@ class Transaction {
     this.meta = data.meta || {};
   }
 
-  // Save transaction to in-memory storage
+  // Save transaction to MongoDB
   async save() {
     try {
-      // Check if transaction already exists
-      const existingIndex = transactions.findIndex(t => t.signature === this.signature);
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
       
-      if (existingIndex >= 0) {
+      // Check if transaction already exists
+      const existing = await collection.findOne({ signature: this.signature });
+      
+      if (existing) {
         // Update existing transaction
-        transactions[existingIndex] = this;
+        await collection.updateOne(
+          { signature: this.signature },
+          { $set: this }
+        );
         console.log(`Updated transaction: ${this.signature}`);
       } else {
-        // Add new transaction
-        transactions.push(this);
+        // Insert new transaction
+        await collection.insertOne(this);
         console.log(`Saved new transaction: ${this.signature}`);
       }
       
@@ -47,15 +51,10 @@ class Transaction {
     try {
       console.log(`Finding transactions with query:`, query);
       
-      // Filter transactions based on query
-      return transactions.filter(transaction => {
-        for (const [key, value] of Object.entries(query)) {
-          if (transaction[key] !== value) {
-            return false;
-          }
-        }
-        return true;
-      });
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      return await collection.find(query).toArray();
     } catch (error) {
       console.error('Error finding transactions:', error);
       return [];
@@ -67,15 +66,10 @@ class Transaction {
     try {
       console.log(`Finding one transaction with query:`, query);
       
-      // Find first transaction matching query
-      return transactions.find(transaction => {
-        for (const [key, value] of Object.entries(query)) {
-          if (transaction[key] !== value) {
-            return false;
-          }
-        }
-        return true;
-      }) || null;
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      return await collection.findOne(query);
     } catch (error) {
       console.error('Error finding transaction:', error);
       return null;
@@ -85,7 +79,12 @@ class Transaction {
   // Get all transactions
   static async getAll() {
     try {
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      const transactions = await collection.find({}).toArray();
       console.log(`Getting all transactions (count: ${transactions.length})`);
+      
       return transactions;
     } catch (error) {
       console.error('Error getting all transactions:', error);
@@ -96,7 +95,10 @@ class Transaction {
   // Get transaction count
   static async getCount() {
     try {
-      return transactions.length;
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      return await collection.countDocuments({});
     } catch (error) {
       console.error('Error getting transaction count:', error);
       return 0;
@@ -106,7 +108,10 @@ class Transaction {
   // Get transactions by type
   static async getByType(type) {
     try {
-      return transactions.filter(t => t.type === type);
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      return await collection.find({ type }).toArray();
     } catch (error) {
       console.error(`Error getting transactions by type ${type}:`, error);
       return [];
@@ -116,7 +121,10 @@ class Transaction {
   // Get transactions by token
   static async getByToken(token) {
     try {
-      return transactions.filter(t => t.token === token);
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      return await collection.find({ token }).toArray();
     } catch (error) {
       console.error(`Error getting transactions by token ${token}:`, error);
       return [];
@@ -126,7 +134,10 @@ class Transaction {
   // Get transactions by token mint
   static async getByTokenMint(tokenMint) {
     try {
-      return transactions.filter(t => t.tokenMint === tokenMint);
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      return await collection.find({ tokenMint }).toArray();
     } catch (error) {
       console.error(`Error getting transactions by token mint ${tokenMint}:`, error);
       return [];
@@ -134,23 +145,47 @@ class Transaction {
   }
 
   // Set last fetch timestamp
-  static setLastFetchTimestamp(timestamp) {
-    lastFetchTimestamp = timestamp;
-    console.log(`Set last fetch timestamp: ${timestamp}`);
+  static async setLastFetchTimestamp(timestamp) {
+    try {
+      const { db } = await connectToDatabase();
+      const collection = db.collection('metadata');
+      
+      await collection.updateOne(
+        { key: 'lastFetchTimestamp' },
+        { $set: { value: timestamp } },
+        { upsert: true }
+      );
+      
+      console.log(`Set last fetch timestamp: ${timestamp}`);
+    } catch (error) {
+      console.error('Error setting last fetch timestamp:', error);
+    }
   }
 
   // Get last fetch timestamp
-  static getLastFetchTimestamp() {
-    return lastFetchTimestamp;
+  static async getLastFetchTimestamp() {
+    try {
+      const { db } = await connectToDatabase();
+      const collection = db.collection('metadata');
+      
+      const doc = await collection.findOne({ key: 'lastFetchTimestamp' });
+      return doc ? doc.value : null;
+    } catch (error) {
+      console.error('Error getting last fetch timestamp:', error);
+      return null;
+    }
   }
 
   // Clear all transactions (for testing)
   static async clearAll() {
     try {
-      const count = transactions.length;
-      transactions.length = 0;
-      console.log(`Cleared all transactions (count: ${count})`);
-      return count;
+      const { db } = await connectToDatabase();
+      const collection = db.collection('transactions');
+      
+      const result = await collection.deleteMany({});
+      console.log(`Cleared all transactions (count: ${result.deletedCount})`);
+      
+      return result.deletedCount;
     } catch (error) {
       console.error('Error clearing transactions:', error);
       return 0;
