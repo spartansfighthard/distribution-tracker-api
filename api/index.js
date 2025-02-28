@@ -6,7 +6,7 @@ const cors = require('cors');
 const axios = require('axios');
 const { setTimeout } = require('timers/promises');
 
-// Configuration
+// Updated configuration for better rate limiting (2025-02-28)
 const CONFIG = {
   // API rate limiting
   rateLimits: {
