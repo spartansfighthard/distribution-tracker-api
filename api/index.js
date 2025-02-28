@@ -567,8 +567,8 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
     const signatures = response.data.result;
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
-    // For Vercel, we'll fetch transaction details for a smaller number of transactions to avoid timeouts
-    const maxToProcess = Math.min(signatures.length, 30); // Process up to 30 transactions
+    // For Vercel, we'll fetch transaction details for exactly 10 transactions to avoid timeouts
+    const maxToProcess = Math.min(signatures.length, 10); // Process exactly 10 transactions
     const processedTransactions = [];
     
     // Start time tracking
@@ -706,7 +706,7 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
         fetchAllHistoricalTransactions().catch(err => 
           console.error('Error in scheduled historical transaction fetch:', err)
         );
-      }, 5000); // Wait 5 seconds before starting historical fetch
+      }, 10000); // Wait exactly 10 seconds before starting historical fetch
     }
     
     return processedTransactions;
@@ -1984,7 +1984,7 @@ async function fetchAllHistoricalTransactions() {
     let beforeSignature = null;
     const batchSize = 50; // Fetch 50 signatures at a time
     let batchCount = 0;
-    const maxBatches = 3; // Process up to 3 batches per run to avoid timeouts
+    const maxBatches = 2; // Process up to 2 batches per run to avoid timeouts
     
     // Start time tracking
     const startTime = Date.now();
@@ -2085,8 +2085,8 @@ async function fetchAllHistoricalTransactions() {
       }
       
       // Process new signatures - OPTIMIZED VERSION
-      // Instead of processing all signatures, just process a small batch to avoid timeouts
-      const maxSignaturesToProcess = Math.min(newSignatures.length, 15); // Process up to 15 signatures per run
+      // Process exactly 10 signatures per run as requested
+      const maxSignaturesToProcess = Math.min(newSignatures.length, 10); // Process exactly 10 signatures per run
       const batchProcessedTransactions = [];
       const batchStartTime = Date.now();
       
@@ -2249,14 +2249,14 @@ async function fetchAllHistoricalTransactions() {
     
     console.log(`[Vercel] Historical fetch complete. Added ${allNewTransactions.length} new transactions in ${batchCount} batches.`);
     
-    // Schedule another run if we have more signatures to process
+    // Schedule another run if we have more signatures to process - exactly 10 seconds as requested
     if (hasMore || (allNewTransactions.length > 0 && existingSignatures.size < 1000)) {
       console.log('[Vercel] Scheduling another historical fetch to process more signatures...');
       nodeSetTimeout(() => {
         fetchAllHistoricalTransactions().catch(err => 
           console.error('Error in scheduled historical transaction fetch:', err)
         );
-      }, 10000); // Wait 10 seconds before the next run
+      }, 10000); // Wait exactly 10 seconds before the next run
     }
     
     return allNewTransactions;
