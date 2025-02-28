@@ -4,6 +4,74 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const { setTimeout } = require('timers/promises');
+
+// Configuration
+const CONFIG = {
+  // API rate limiting
+  rateLimits: {
+    requestsPerSecond: 2,       // Maximum requests per second to Helius API
+    retryDelay: 2000,           // Base delay in ms when hitting rate limits
+    maxRetries: 3,              // Maximum number of retries for failed requests
+    batchSize: 5,               // Number of transactions to process in each batch
+    batchDelay: 2000,           // Delay between processing batches in ms
+  },
+  // Transaction fetching
+  transactions: {
+    maxTransactionsToFetch: 100, // Maximum number of transactions to fetch at once
+    cacheExpiration: 5 * 60 * 1000, // Cache expiration time in ms (5 minutes)
+  }
+};
+
+// Rate limiter utility
+class RateLimiter {
+  constructor(requestsPerSecond = CONFIG.rateLimits.requestsPerSecond) {
+    this.requestsPerSecond = requestsPerSecond;
+    this.queue = [];
+    this.processing = false;
+    this.lastRequestTime = 0;
+  }
+
+  async throttle() {
+    const now = Date.now();
+    const timeToWait = Math.max(0, 1000 / this.requestsPerSecond - (now - this.lastRequestTime));
+    
+    if (timeToWait > 0) {
+      console.log(`Rate limiting: waiting ${timeToWait}ms before next request`);
+      await setTimeout(timeToWait);
+    }
+    
+    this.lastRequestTime = Date.now();
+  }
+
+  async sendRequest(requestFn) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        await this.throttle();
+        const result = await requestFn();
+        resolve(result);
+      } catch (error) {
+        // If we hit a rate limit, wait longer and retry
+        if (error.response && error.response.status === 429) {
+          console.log(`Rate limit hit, waiting ${CONFIG.rateLimits.retryDelay}ms before retrying...`);
+          await setTimeout(CONFIG.rateLimits.retryDelay);
+          try {
+            await this.throttle();
+            const result = await requestFn();
+            resolve(result);
+          } catch (retryError) {
+            reject(retryError);
+          }
+        } else {
+          reject(error);
+        }
+      }
+    });
+  }
+}
+
+// Create a rate limiter instance
+const heliusRateLimiter = new RateLimiter(CONFIG.rateLimits.requestsPerSecond);
 
 // Create Express app
 const app = express();
@@ -104,13 +172,15 @@ async function fetchTransactions() {
       params: [
         DISTRIBUTION_WALLET_ADDRESS,
         {
-          limit: 100
+          limit: CONFIG.transactions.maxTransactionsToFetch
         }
       ]
     };
     
     // Make request to Helius API
-    const response = await axios.post(HELIUS_RPC_URL, requestData);
+    const response = await heliusRateLimiter.sendRequest(async () => {
+      return await axios.post(HELIUS_RPC_URL, requestData);
+    });
     
     // Check if response is valid
     if (!response.data || !response.data.result) {
@@ -122,27 +192,43 @@ async function fetchTransactions() {
     const signatures = response.data.result;
     console.log(`Fetched ${signatures.length} signatures`);
     
-    // Process each signature
+    // Filter out signatures that we've already processed
+    const newSignatures = signatures.filter(sig => 
+      !transactions.some(tx => tx.signature === sig.signature)
+    );
+    console.log(`Found ${newSignatures.length} new signatures to process`);
+    
+    // Process signatures in batches to avoid overwhelming the API
+    const batchSize = CONFIG.rateLimits.batchSize;
     const newTransactions = [];
-    for (const sig of signatures) {
-      // Skip if transaction is already processed
-      const existingTx = transactions.find(t => t.signature === sig.signature);
-      if (existingTx) {
-        console.log(`Transaction already exists: ${sig.signature}`);
-        continue;
-      }
+    
+    for (let i = 0; i < newSignatures.length; i += batchSize) {
+      console.log(`Processing batch ${Math.floor(i/batchSize) + 1} of ${Math.ceil(newSignatures.length/batchSize)}`);
       
-      // Get transaction details
-      const txDetails = await getTransactionDetails(sig.signature);
-      if (txDetails) {
-        newTransactions.push(txDetails);
+      const batch = newSignatures.slice(i, i + batchSize);
+      const batchPromises = batch.map(sig => getTransactionDetails(sig.signature));
+      
+      // Wait for all transactions in the batch to be processed
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      // Filter out failed promises and add successful ones to our transactions list
+      const successfulTransactions = batchResults
+        .filter(result => result.status === 'fulfilled' && result.value)
+        .map(result => result.value);
+      
+      newTransactions.push(...successfulTransactions);
+      
+      // Add a delay between batches to avoid overwhelming the API
+      if (i + batchSize < newSignatures.length) {
+        console.log(`Waiting ${CONFIG.rateLimits.batchDelay}ms between batches to respect rate limits...`);
+        await setTimeout(CONFIG.rateLimits.batchDelay);
       }
     }
     
     // Update last fetch timestamp
     lastFetchTimestamp = new Date().toISOString();
     
-    console.log(`Processed ${newTransactions.length} new transactions`);
+    console.log(`Successfully processed ${newTransactions.length} new transactions`);
     return newTransactions;
   } catch (error) {
     console.error('Error fetching transactions:', error);
@@ -152,49 +238,72 @@ async function fetchTransactions() {
 
 // Get transaction details from Helius API
 async function getTransactionDetails(signature) {
-  try {
-    console.log(`Getting details for transaction: ${signature}`);
-    
-    // Prepare request data
-    const requestData = {
-      jsonrpc: '2.0',
-      id: 'my-id',
-      method: 'getTransaction',
-      params: [
-        signature,
-        {
-          encoding: 'jsonParsed',
-          maxSupportedTransactionVersion: 0
-        }
-      ]
-    };
-    
-    // Make request to Helius API
-    const response = await axios.post(HELIUS_RPC_URL, requestData);
-    
-    // Check if response is valid
-    if (!response.data || !response.data.result) {
-      console.error('Invalid response from Helius API:', response.data);
+  let retries = 0;
+  const maxRetries = CONFIG.rateLimits.maxRetries;
+  
+  while (retries <= maxRetries) {
+    try {
+      console.log(`Getting details for transaction: ${signature}`);
+      
+      // Prepare request data
+      const requestData = {
+        jsonrpc: '2.0',
+        id: 'my-id',
+        method: 'getTransaction',
+        params: [
+          signature,
+          {
+            encoding: 'jsonParsed',
+            maxSupportedTransactionVersion: 0
+          }
+        ]
+      };
+      
+      // Make request to Helius API
+      const response = await heliusRateLimiter.sendRequest(async () => {
+        return await axios.post(HELIUS_RPC_URL, requestData);
+      });
+      
+      // Check if response is valid
+      if (!response.data || !response.data.result) {
+        console.error('Invalid response from Helius API:', response.data);
+        return null;
+      }
+      
+      // Get transaction data
+      const txData = response.data.result;
+      
+      // Process transaction data
+      const transaction = processTransaction(signature, txData);
+      if (transaction) {
+        // Save transaction to in-memory storage
+        const txModel = new Transaction(transaction);
+        await txModel.save();
+        return transaction;
+      }
+      
       return null;
+    } catch (error) {
+      retries++;
+      
+      // If we've hit a rate limit and have retries left, wait and try again
+      if (error.response && error.response.status === 429 && retries <= maxRetries) {
+        const waitTime = Math.pow(2, retries) * CONFIG.rateLimits.retryDelay; // Exponential backoff
+        console.log(`Rate limit hit, retrying in ${waitTime}ms (attempt ${retries}/${maxRetries})...`);
+        await setTimeout(waitTime);
+      } else if (retries <= maxRetries) {
+        // For other errors, wait a bit less before retrying
+        console.log(`Error fetching transaction, retrying in 1000ms (attempt ${retries}/${maxRetries})...`);
+        await setTimeout(1000);
+      } else {
+        // We've exhausted our retries
+        console.error(`Error getting transaction details for ${signature} after ${maxRetries} retries:`, error.message);
+        return null;
+      }
     }
-    
-    // Get transaction data
-    const txData = response.data.result;
-    
-    // Process transaction data
-    const transaction = processTransaction(signature, txData);
-    if (transaction) {
-      // Save transaction to in-memory storage
-      const txModel = new Transaction(transaction);
-      await txModel.save();
-      return transaction;
-    }
-    
-    return null;
-  } catch (error) {
-    console.error(`Error getting transaction details for ${signature}:`, error);
-    return null;
   }
+  
+  return null;
 }
 
 // Process transaction data
@@ -315,6 +424,11 @@ function getStats() {
   }
 }
 
+// Wrap API endpoints with error handling
+const asyncHandler = fn => (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
 // Root route handler
 app.get('/', (req, res) => {
   res.status(200).json({
@@ -359,166 +473,131 @@ app.get('/api/help', (req, res) => {
 });
 
 // Get overall SOL statistics
-app.get('/api/stats', async (req, res) => {
-  try {
-    console.log('Getting overall SOL statistics...');
-    
-    // If no transactions, try to fetch some
-    if (transactions.length === 0) {
-      await fetchTransactions();
-    }
-    
-    // Get transaction statistics
-    const stats = getStats();
-    
-    // Return statistics
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      stats
-    });
-  } catch (error) {
-    console.error('Error getting statistics:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to get statistics',
-        details: error.message
-      }
-    });
+app.get('/api/stats', asyncHandler(async (req, res) => {
+  console.log('Getting overall SOL statistics...');
+  
+  // If no transactions or cache expired, try to fetch some
+  const cacheExpired = lastFetchTimestamp && 
+    (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
+  
+  if (transactions.length === 0 || cacheExpired) {
+    await fetchTransactions();
   }
-});
+  
+  // Get transaction statistics
+  const stats = getStats();
+  
+  // Return statistics
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    stats
+  });
+}));
 
 // Get SOL distribution data
-app.get('/api/distributed', async (req, res) => {
-  try {
-    console.log('Getting SOL distribution data...');
-    
-    // If no transactions, try to fetch some
-    if (transactions.length === 0) {
-      await fetchTransactions();
-    }
-    
-    // Get transactions with type 'sent'
-    const sentTransactions = transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
-    
-    // Calculate distribution statistics
-    const stats = {
-      totalTransactions: sentTransactions.length,
-      totalDistributed: sentTransactions.reduce((sum, tx) => sum + tx.amount, 0),
-      averageDistribution: sentTransactions.length > 0 
-        ? sentTransactions.reduce((sum, tx) => sum + tx.amount, 0) / sentTransactions.length 
-        : 0,
-      largestDistribution: sentTransactions.length > 0 
-        ? Math.max(...sentTransactions.map(tx => tx.amount)) 
-        : 0,
-      smallestDistribution: sentTransactions.length > 0 
-        ? Math.min(...sentTransactions.map(tx => tx.amount)) 
-        : 0,
-      recentDistributions: sentTransactions.slice(0, 5)
-    };
-    
-    // Return statistics
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      stats
-    });
-  } catch (error) {
-    console.error('Error getting distribution data:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to get distribution data',
-        details: error.message
-      }
-    });
+app.get('/api/distributed', asyncHandler(async (req, res) => {
+  console.log('Getting SOL distribution data...');
+  
+  // If no transactions or cache expired, try to fetch some
+  const cacheExpired = lastFetchTimestamp && 
+    (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
+  
+  if (transactions.length === 0 || cacheExpired) {
+    await fetchTransactions();
   }
-});
+  
+  // Get transactions with type 'sent'
+  const sentTransactions = transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL');
+  
+  // Calculate distribution statistics
+  const stats = {
+    totalTransactions: sentTransactions.length,
+    totalDistributed: sentTransactions.reduce((sum, tx) => sum + tx.amount, 0),
+    averageDistribution: sentTransactions.length > 0 
+      ? sentTransactions.reduce((sum, tx) => sum + tx.amount, 0) / sentTransactions.length 
+      : 0,
+    largestDistribution: sentTransactions.length > 0 
+      ? Math.max(...sentTransactions.map(tx => tx.amount)) 
+      : 0,
+    smallestDistribution: sentTransactions.length > 0 
+      ? Math.min(...sentTransactions.map(tx => tx.amount)) 
+      : 0,
+    recentDistributions: sentTransactions.slice(0, 5)
+  };
+  
+  // Return statistics
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    stats
+  });
+}));
 
 // Get detailed SOL transfer statistics
-app.get('/api/sol', async (req, res) => {
-  try {
-    console.log('Getting detailed SOL transfer statistics...');
-    
-    // If no transactions, try to fetch some
-    if (transactions.length === 0) {
-      await fetchTransactions();
-    }
-    
-    // Get transactions for SOL
-    const solTransactions = transactions.filter(tx => tx.token === 'SOL');
-    
-    // Calculate statistics
-    const received = solTransactions.filter(tx => tx.type === 'received');
-    const sent = solTransactions.filter(tx => tx.type === 'sent');
-    
-    const stats = {
-      totalTransactions: solTransactions.length,
-      received: {
-        count: received.length,
-        total: received.reduce((sum, tx) => sum + tx.amount, 0),
-        average: received.length > 0 
-          ? received.reduce((sum, tx) => sum + tx.amount, 0) / received.length 
-          : 0
-      },
-      sent: {
-        count: sent.length,
-        total: sent.reduce((sum, tx) => sum + tx.amount, 0),
-        average: sent.length > 0 
-          ? sent.reduce((sum, tx) => sum + tx.amount, 0) / sent.length 
-          : 0
-      },
-      balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0),
-      recentTransactions: solTransactions.slice(0, 5)
-    };
-    
-    // Return statistics
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      stats
-    });
-  } catch (error) {
-    console.error('Error getting SOL transfer statistics:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to get SOL transfer statistics',
-        details: error.message
-      }
-    });
+app.get('/api/sol', asyncHandler(async (req, res) => {
+  console.log('Getting detailed SOL transfer statistics...');
+  
+  // If no transactions or cache expired, try to fetch some
+  const cacheExpired = lastFetchTimestamp && 
+    (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
+  
+  if (transactions.length === 0 || cacheExpired) {
+    await fetchTransactions();
   }
-});
+  
+  // Get transactions for SOL
+  const solTransactions = transactions.filter(tx => tx.token === 'SOL');
+  
+  // Calculate statistics
+  const received = solTransactions.filter(tx => tx.type === 'received');
+  const sent = solTransactions.filter(tx => tx.type === 'sent');
+  
+  const stats = {
+    totalTransactions: solTransactions.length,
+    received: {
+      count: received.length,
+      total: received.reduce((sum, tx) => sum + tx.amount, 0),
+      average: received.length > 0 
+        ? received.reduce((sum, tx) => sum + tx.amount, 0) / received.length 
+        : 0
+    },
+    sent: {
+      count: sent.length,
+      total: sent.reduce((sum, tx) => sum + tx.amount, 0),
+      average: sent.length > 0 
+        ? sent.reduce((sum, tx) => sum + tx.amount, 0) / sent.length 
+        : 0
+    },
+    balance: received.reduce((sum, tx) => sum + tx.amount, 0) - sent.reduce((sum, tx) => sum + tx.amount, 0),
+    recentTransactions: solTransactions.slice(0, 5)
+  };
+  
+  // Return statistics
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    stats
+  });
+}));
 
 // Force refresh historical transaction data
-app.post('/api/refresh', async (req, res) => {
-  try {
-    console.log('Refreshing historical transaction data...');
-    
-    // Fetch transactions
-    const newTransactions = await fetchTransactions();
-    
-    // Return transactions
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      message: 'Historical transaction data refreshed successfully',
-      count: newTransactions.length,
-      totalTransactions: transactions.length,
-      recentTransactions: transactions.slice(0, 5)
-    });
-  } catch (error) {
-    console.error('Error refreshing transaction data:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to refresh transaction data',
-        details: error.message
-      }
-    });
-  }
-});
+app.post('/api/refresh', asyncHandler(async (req, res) => {
+  console.log('Refreshing historical transaction data...');
+  
+  // Fetch transactions
+  const newTransactions = await fetchTransactions();
+  
+  // Return transactions
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    message: 'Historical transaction data refreshed successfully',
+    count: newTransactions.length,
+    totalTransactions: transactions.length,
+    recentTransactions: transactions.slice(0, 5)
+  });
+}));
 
 // Add a sample transaction (for testing)
 app.get('/api/add-sample', async (req, res) => {

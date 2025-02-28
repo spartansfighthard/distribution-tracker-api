@@ -33,24 +33,67 @@ try {
     bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
     console.log('Telegram bot initialized successfully');
     
+    // Set bot commands
+    bot.setMyCommands([
+      { command: 'stats', description: 'Show overall SOL statistics' },
+      { command: 'distributed', description: 'Show SOL distribution data' },
+      { command: 'sol', description: 'Show detailed SOL transfer statistics' },
+      { command: 'refresh', description: 'Force refresh historical transaction data' },
+      { command: 'help', description: 'Show this help message' }
+    ]).then(() => {
+      console.log('Bot commands set successfully');
+    }).catch(error => {
+      console.error('Error setting bot commands:', error);
+    });
+    
     // Define bot commands
     bot.onText(/\/start/, (msg) => {
       const chatId = msg.chat.id;
-      bot.sendMessage(chatId, 'Welcome to the SOL Distribution Tracker Bot!');
+      bot.sendMessage(chatId, 'Welcome to the SOL Distribution Tracker Bot! Use /help to see available commands.');
     });
     
     bot.onText(/\/help/, (msg) => {
       const chatId = msg.chat.id;
-      bot.sendMessage(chatId, 'Available commands:\n/start - Start the bot\n/help - Show this help message\n/stats - Show distribution statistics');
+      bot.sendMessage(chatId, 'Available commands:\n/stats - Show overall SOL statistics\n/distributed - Show SOL distribution data\n/sol - Show detailed SOL transfer statistics\n/refresh - Force refresh historical transaction data\n/help - Show this help message');
     });
     
     bot.onText(/\/stats/, async (msg) => {
       const chatId = msg.chat.id;
       try {
-        bot.sendMessage(chatId, 'Fetching statistics...');
-        // You can implement actual stats fetching here
+        bot.sendMessage(chatId, 'Fetching overall SOL statistics...');
+        // Implement stats fetching here
       } catch (error) {
         bot.sendMessage(chatId, `Error fetching statistics: ${error.message}`);
+      }
+    });
+    
+    bot.onText(/\/distributed/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        bot.sendMessage(chatId, 'Fetching SOL distribution data...');
+        // Implement distribution data fetching here
+      } catch (error) {
+        bot.sendMessage(chatId, `Error fetching distribution data: ${error.message}`);
+      }
+    });
+    
+    bot.onText(/\/sol/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        bot.sendMessage(chatId, 'Fetching detailed SOL transfer statistics...');
+        // Implement SOL transfer stats fetching here
+      } catch (error) {
+        bot.sendMessage(chatId, `Error fetching SOL transfer statistics: ${error.message}`);
+      }
+    });
+    
+    bot.onText(/\/refresh/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        bot.sendMessage(chatId, 'Refreshing historical transaction data...');
+        // Implement data refresh here
+      } catch (error) {
+        bot.sendMessage(chatId, `Error refreshing data: ${error.message}`);
       }
     });
   } else {
