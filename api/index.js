@@ -254,13 +254,19 @@ const storage = {
           const blobs = await list();
           console.log(`Available blobs: ${blobs.blobs.length}`);
           
-          // Find our data blob in the list
-          const dataBlob = blobs.blobs.find(blob => 
-            blob.pathname === STORAGE_CONFIG.blobStoragePath
-          );
+          // Find all data blobs (they should start with transactions/data)
+          const dataBlobs = blobs.blobs.filter(blob => 
+            blob.pathname.startsWith('transactions/data')
+          ).sort((a, b) => {
+            // Sort by creation time, newest first
+            return new Date(b.uploadedAt) - new Date(a.uploadedAt);
+          });
           
-          if (dataBlob) {
-            console.log(`Found data blob: ${dataBlob.pathname}, size: ${dataBlob.size} bytes`);
+          if (dataBlobs.length > 0) {
+            // Use the most recent blob
+            const dataBlob = dataBlobs[0];
+            console.log(`Found data blob: ${dataBlob.pathname}, size: ${dataBlob.size} bytes, uploaded at: ${dataBlob.uploadedAt}`);
+            
             // Get the blob content using the URL
             const response = await fetch(dataBlob.url);
             if (response.ok) {
@@ -303,7 +309,7 @@ const storage = {
               console.error(`Failed to fetch blob: ${response.status} ${response.statusText}`);
             }
           } else {
-            console.log('Blob not found in the list, will fetch fresh data');
+            console.log('No data blobs found in the list, will fetch fresh data');
             // If no blob found, trigger a historical fetch
             nodeSetTimeout(() => {
               fetchAllHistoricalTransactions().catch(err => 
@@ -382,13 +388,7 @@ const storage = {
           const startTime = isServerlessFunction ? Date.now() : 0;
           const timeLimit = isServerlessFunction ? 8000 : Infinity; // 8 seconds max for saving in serverless
           
-          // If we're approaching the time limit, save a smaller batch
-          if (isServerlessFunction && transactionsToStore.length > 100 && (now - startTime) > timeLimit / 2) {
-            console.log(`Approaching time limit, saving only the most recent 100 transactions instead of ${transactionsToStore.length}`);
-            dataToStore.transactions = transactionsToStore.slice(0, 100);
-            console.log(`Reduced transaction count to ${dataToStore.transactions.length} for saving`);
-          }
-          
+          // Import the Vercel Blob SDK properly
           const { put } = await import('@vercel/blob');
           
           // Convert data to JSON string
@@ -397,8 +397,12 @@ const storage = {
           // Create a Blob from the JSON string
           const blob = new Blob([jsonData], { type: 'application/json' });
           
-          // Upload to Vercel Blob Storage
-          const { url } = await put(STORAGE_CONFIG.blobStoragePath, blob, {
+          // Upload to Vercel Blob Storage with a unique filename to avoid caching issues
+          const timestamp = Date.now();
+          const randomId = Math.random().toString(36).substring(2, 8);
+          const uniquePath = STORAGE_CONFIG.blobStoragePath.replace('.json', `-${randomId}.json`);
+          
+          const { url } = await put(uniquePath, blob, {
             access: 'public',
           });
           
@@ -517,12 +521,45 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
       ]
     };
     
-    // Make direct request to Helius API without rate limiting
-    const response = await axios.post(HELIUS_RPC_URL, requestData);
+    // Add retry logic for rate limiting
+    let retryCount = 0;
+    let success = false;
+    let response;
+    
+    while (!success && retryCount < 5) {
+      try {
+        // Make direct request to Helius API with proper headers
+        response = await axios.post(HELIUS_RPC_URL, requestData, {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': HELIUS_API_KEY
+          },
+          timeout: 10000 // 10 second timeout
+        });
+        
+        success = true;
+      } catch (error) {
+        retryCount++;
+        const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000); // Exponential backoff, max 30 seconds
+        
+        if (error.response && error.response.status === 429) {
+          console.log(`[Vercel] Rate limit hit (429), retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+        } else {
+          console.log(`[Vercel] Request error: ${error.message}, retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+        }
+        
+        if (retryCount < 5) {
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        } else {
+          console.log('[Vercel] Max retries reached, returning empty result');
+          return [];
+        }
+      }
+    }
     
     // Check if response is valid
-    if (!response.data || !response.data.result) {
-      console.error('Invalid response from Helius API:', response.data);
+    if (!success || !response || !response.data || !response.data.result) {
+      console.error('Invalid response from Helius API:', response?.data);
       return [];
     }
     
@@ -531,12 +568,12 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
     // For Vercel, we'll fetch transaction details for a smaller number of transactions to avoid timeouts
-    const maxToProcess = Math.min(signatures.length, 20); // Reduced from 100 to 20 to avoid timeouts
+    const maxToProcess = Math.min(signatures.length, 30); // Process up to 30 transactions
     const processedTransactions = [];
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 8000; // Reduced from 12s to 8s to be more conservative
+    const timeLimit = 8000; // 8 seconds time limit to be conservative
     
     // Process signatures one by one
     for (let i = 0; i < maxToProcess; i++) {
@@ -562,11 +599,44 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
           ]
         };
         
-        // Make direct request without rate limiting
-        const txResponse = await axios.post(HELIUS_RPC_URL, txRequestData);
+        // Add retry logic for transaction details
+        let txRetryCount = 0;
+        let txSuccess = false;
+        let txResponse;
         
-        if (!txResponse.data || !txResponse.data.result) {
-          console.log(`[Vercel] Invalid response for transaction ${sig.signature}`);
+        while (!txSuccess && txRetryCount < 3) {
+          try {
+            // Make direct request with retry logic
+            txResponse = await axios.post(HELIUS_RPC_URL, txRequestData, {
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': HELIUS_API_KEY
+              },
+              timeout: 10000 // 10 second timeout
+            });
+            
+            txSuccess = true;
+          } catch (txError) {
+            txRetryCount++;
+            const txWaitTime = Math.min(1000 * Math.pow(2, txRetryCount), 10000); // Exponential backoff, max 10 seconds
+            
+            if (txError.response && txError.response.status === 429) {
+              console.log(`[Vercel] Rate limit hit (429) for transaction ${sig.signature}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
+            } else {
+              console.log(`[Vercel] Transaction request error: ${txError.message}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
+            }
+            
+            if (txRetryCount < 3) {
+              await new Promise(resolve => setTimeout(resolve, txWaitTime));
+            } else {
+              console.log(`[Vercel] Max retries reached for transaction ${sig.signature}, skipping`);
+              continue;
+            }
+          }
+        }
+        
+        if (!txSuccess || !txResponse || !txResponse.data || !txResponse.data.result) {
+          console.log(`[Vercel] Invalid response for transaction ${sig.signature}, skipping`);
           continue;
         }
         
@@ -627,44 +697,16 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
       }
     }
     
-    console.log(`[Vercel] Successfully processed ${processedTransactions.length} transactions in ${Date.now() - startTime}ms`);
+    console.log(`[Vercel] Processed ${processedTransactions.length} out of ${signatures.length} transactions`);
     
-    // Store the processed transactions in memory
-    if (processedTransactions.length > 0) {
-      // Load existing transactions from storage first
-      await storage.load();
-      
-      // Add new transactions, avoiding duplicates
-      const existingSignatures = new Set(transactions.map(tx => tx.signature));
-      const newUniqueTransactions = processedTransactions.filter(tx => !existingSignatures.has(tx.signature));
-      
-      if (newUniqueTransactions.length > 0) {
-        console.log(`[Vercel] Adding ${newUniqueTransactions.length} new unique transactions to storage`);
-        transactions.push(...newUniqueTransactions);
-        
-        // Sort transactions by blockTime (newest first)
-        transactions.sort((a, b) => b.blockTime - a.blockTime);
-        
-        lastFetchTimestamp = new Date().toISOString();
-        
-        // Save to persistent storage
-        console.log('[Vercel] Saving all transactions to Blob storage...');
-        await storage.save();
-        
-        // After saving initial transactions, trigger historical fetch to get more in the background
-        // But only if we have fewer than 100 transactions to avoid unnecessary processing
-        if (transactions.length < 100) {
-          console.log('[Vercel] Triggering historical transaction fetch to get more data...');
-          // Use setTimeout to run this asynchronously after the current request completes
-          nodeSetTimeout(() => {
-            fetchAllHistoricalTransactions().catch(err => 
-              console.error('Error fetching historical transactions after initial fetch:', err)
-            );
-          }, 100);
-        }
-      } else {
-        console.log('[Vercel] No new unique transactions to add');
-      }
+    // If we have more signatures to process, trigger a historical fetch
+    if (signatures.length > processedTransactions.length) {
+      console.log(`[Vercel] There are ${signatures.length - processedTransactions.length} more signatures to process, triggering historical fetch...`);
+      nodeSetTimeout(() => {
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error in scheduled historical transaction fetch:', err)
+        );
+      }, 5000); // Wait 5 seconds before starting historical fetch
     }
     
     return processedTransactions;
@@ -1023,19 +1065,21 @@ const asyncHandler = fn => async (req, res, next) => {
 
 // Root route handler
 app.get('/', (req, res) => {
-  res.status(200).json({
-    success: true,
-    message: 'SOL Distribution Tracker API is running',
-    version: process.env.npm_package_version || '1.0.0',
-    environment: process.env.NODE_ENV || 'development',
-    vercel: process.env.VERCEL ? true : false,
+  res.json({
+    name: 'Distribution Tracker API',
+    version: '1.0.0',
     endpoints: [
       '/api/stats',
       '/api/distributed',
       '/api/sol',
       '/api/refresh',
+      '/api/fetch-all',
+      '/api/fetch-status',
+      '/api/force-save',
+      '/api/force-refresh',
       '/api/help'
-    ]
+    ],
+    message: 'Use /api/help for more information about the endpoints'
   });
 });
 
@@ -1094,16 +1138,20 @@ app.get('/api/storage-check', async (req, res) => {
 
 // Help endpoint
 app.get('/api/help', (req, res) => {
-  res.status(200).json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    commands: [
-      { command: '/stats', description: 'Show overall SOL statistics' },
-      { command: '/distributed', description: 'Show SOL distribution data' },
-      { command: '/sol', description: 'Show detailed SOL transfer statistics' },
-      { command: '/refresh', description: 'Force refresh historical transaction data' },
-      { command: '/help', description: 'Show this help message' }
-    ]
+  res.json({
+    name: 'Distribution Tracker API',
+    version: '1.0.0',
+    endpoints: {
+      '/api/stats': 'Get distribution statistics',
+      '/api/distributed': 'Get all distributed transactions',
+      '/api/sol': 'Get SOL transactions',
+      '/api/refresh': 'Refresh transaction data',
+      '/api/fetch-all': 'Fetch all historical transactions',
+      '/api/fetch-status': 'Check transaction fetch status',
+      '/api/force-save': 'Force save transactions to storage',
+      '/api/force-refresh': 'Force a full refresh of all transactions',
+      '/': 'This help information'
+    }
   });
 });
 
@@ -1925,8 +1973,8 @@ async function fetchAllHistoricalTransactions() {
     const lastFetchTime = lastFetchTimestamp ? new Date(lastFetchTimestamp).getTime() : 0;
     const timeSinceLastFetch = now - lastFetchTime;
     
-    // If we've fetched within the last 5 minutes and have more than 40 transactions, skip
-    if (timeSinceLastFetch < 5 * 60 * 1000 && transactions.length > 40) {
+    // If we've fetched within the last 5 minutes and have more than 100 transactions, skip
+    if (timeSinceLastFetch < 5 * 60 * 1000 && transactions.length > 100) {
       console.log(`[Vercel] Last fetch was ${Math.round(timeSinceLastFetch / 1000)} seconds ago with ${transactions.length} transactions. Skipping to avoid unnecessary processing.`);
       return [];
     }
@@ -1934,13 +1982,13 @@ async function fetchAllHistoricalTransactions() {
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
-    const batchSize = 50; // Increased from 20 to 50
+    const batchSize = 50; // Fetch 50 signatures at a time
     let batchCount = 0;
-    const maxBatches = 2; // Reduced from 20 to 2 batches per run to avoid timeouts
+    const maxBatches = 3; // Process up to 3 batches per run to avoid timeouts
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 10000; // Reduced from 13s to 10s to be more conservative
+    const timeLimit = 8000; // 8 seconds time limit to be conservative
     
     while (hasMore && batchCount < maxBatches) {
       // Check if we're approaching the time limit
@@ -1966,11 +2014,44 @@ async function fetchAllHistoricalTransactions() {
         ]
       };
       
-      // Make direct request to Helius API
-      const response = await axios.post(HELIUS_RPC_URL, requestData);
+      // Add exponential backoff for rate limiting
+      let retryCount = 0;
+      let success = false;
+      let response;
+      
+      while (!success && retryCount < 5) {
+        try {
+          // Make direct request to Helius API
+          response = await axios.post(HELIUS_RPC_URL, requestData, {
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': HELIUS_API_KEY
+            },
+            timeout: 10000 // 10 second timeout
+          });
+          
+          success = true;
+        } catch (error) {
+          retryCount++;
+          const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000); // Exponential backoff, max 30 seconds
+          
+          if (error.response && error.response.status === 429) {
+            console.log(`[Vercel] Rate limit hit (429), retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+          } else {
+            console.log(`[Vercel] Request error: ${error.message}, retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+          }
+          
+          if (retryCount < 5) {
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          } else {
+            console.log('[Vercel] Max retries reached, continuing to next batch');
+            break;
+          }
+        }
+      }
       
       // Check if response is valid
-      if (!response.data || !response.data.result || response.data.result.length === 0) {
+      if (!success || !response || !response.data || !response.data.result || response.data.result.length === 0) {
         console.log('[Vercel] No more signatures found or invalid response');
         hasMore = false;
         break;
@@ -2005,7 +2086,7 @@ async function fetchAllHistoricalTransactions() {
       
       // Process new signatures - OPTIMIZED VERSION
       // Instead of processing all signatures, just process a small batch to avoid timeouts
-      const maxSignaturesToProcess = Math.min(newSignatures.length, 10); // Increased from 5 to 10 signatures per run
+      const maxSignaturesToProcess = Math.min(newSignatures.length, 15); // Process up to 15 signatures per run
       const batchProcessedTransactions = [];
       const batchStartTime = Date.now();
       
@@ -2037,11 +2118,44 @@ async function fetchAllHistoricalTransactions() {
             ]
           };
           
-          // Make direct request without rate limiting
-          const txResponse = await axios.post(HELIUS_RPC_URL, txRequestData);
+          // Add retry logic for transaction details
+          let txRetryCount = 0;
+          let txSuccess = false;
+          let txResponse;
           
-          if (!txResponse.data || !txResponse.data.result) {
-            console.log(`[Vercel] Invalid response for transaction ${sig.signature}`);
+          while (!txSuccess && txRetryCount < 3) {
+            try {
+              // Make direct request with retry logic
+              txResponse = await axios.post(HELIUS_RPC_URL, txRequestData, {
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-api-key': HELIUS_API_KEY
+                },
+                timeout: 10000 // 10 second timeout
+              });
+              
+              txSuccess = true;
+            } catch (txError) {
+              txRetryCount++;
+              const txWaitTime = Math.min(1000 * Math.pow(2, txRetryCount), 10000); // Exponential backoff, max 10 seconds
+              
+              if (txError.response && txError.response.status === 429) {
+                console.log(`[Vercel] Rate limit hit (429) for transaction ${sig.signature}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
+              } else {
+                console.log(`[Vercel] Transaction request error: ${txError.message}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
+              }
+              
+              if (txRetryCount < 3) {
+                await new Promise(resolve => setTimeout(resolve, txWaitTime));
+              } else {
+                console.log(`[Vercel] Max retries reached for transaction ${sig.signature}, skipping`);
+                break;
+              }
+            }
+          }
+          
+          if (!txSuccess || !txResponse || !txResponse.data || !txResponse.data.result) {
+            console.log(`[Vercel] Invalid response for transaction ${sig.signature}, skipping`);
             continue;
           }
           
@@ -2136,13 +2250,13 @@ async function fetchAllHistoricalTransactions() {
     console.log(`[Vercel] Historical fetch complete. Added ${allNewTransactions.length} new transactions in ${batchCount} batches.`);
     
     // Schedule another run if we have more signatures to process
-    if (hasMore && allNewTransactions.length > 0) {
+    if (hasMore || (allNewTransactions.length > 0 && existingSignatures.size < 1000)) {
       console.log('[Vercel] Scheduling another historical fetch to process more signatures...');
       nodeSetTimeout(() => {
         fetchAllHistoricalTransactions().catch(err => 
           console.error('Error in scheduled historical transaction fetch:', err)
         );
-      }, 15000); // Wait 15 seconds before the next run
+      }, 10000); // Wait 10 seconds before the next run
     }
     
     return allNewTransactions;
@@ -2367,3 +2481,27 @@ app.get('/api/force-refresh', asyncHandler(async (req, res) => {
     });
   }
 }));
+
+// Add a redirect for malformed URLs
+app.get('/api/force-refresh/*', (req, res) => {
+  console.log(`Redirecting malformed URL: ${req.originalUrl} to /api/force-refresh`);
+  res.redirect('/api/force-refresh');
+});
+
+// Add a catch-all route for API endpoints
+app.get('/api/*', (req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    availableEndpoints: [
+      '/api/stats',
+      '/api/distributed',
+      '/api/sol',
+      '/api/refresh',
+      '/api/fetch-all',
+      '/api/fetch-status',
+      '/api/force-save',
+      '/api/force-refresh',
+      '/'
+    ]
+  });
+});
