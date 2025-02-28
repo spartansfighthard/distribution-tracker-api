@@ -13,11 +13,11 @@ const nodeSetTimeout = global.setTimeout;
 const STORAGE_CONFIG = {
   localFilePath: path.join(process.cwd(), 'data', 'transactions.json'),
   vercelKVEnabled: process.env.VERCEL_KV_URL ? true : false,
-  vercelBlobEnabled: process.env.BLOB_READ_WRITE_TOKEN ? true : false,
+  vercelBlobEnabled: true, // Always enable Blob storage
   storageKey: 'transactions_data',
   blobStoragePath: 'transactions/data.json',
   maxStoredTransactions: 100, // Maximum number of transactions to store
-  storageInterval: 60 * 1000, // How often to save data (1 minute)
+  storageInterval: 10 * 1000, // How often to save data (10 seconds - reduced from 60)
   lastStorageTime: null
 };
 
@@ -242,66 +242,40 @@ const storage = {
   async load() {
     try {
       if (process.env.VERCEL) {
-        // Try KV storage first if available
-        if (STORAGE_CONFIG.vercelKVEnabled) {
+        // Always try Blob storage in Vercel
+        try {
+          console.log('Attempting to load from Vercel Blob storage...');
+          const { list, get } = await import('@vercel/blob');
+          
+          // List blobs to check if our data exists
+          const blobs = await list();
+          console.log('Available blobs:', blobs);
+          
+          // Try to get our data blob
           try {
-            const { createClient } = require('@vercel/kv');
-            const kv = createClient({
-              url: process.env.VERCEL_KV_URL,
-              token: process.env.VERCEL_KV_TOKEN
-            });
+            const blob = await get(STORAGE_CONFIG.blobStoragePath);
             
-            const storedData = await kv.get(STORAGE_CONFIG.storageKey);
-            if (storedData) {
-              const parsedData = JSON.parse(storedData);
-              if (parsedData.transactions && Array.isArray(parsedData.transactions)) {
+            if (blob) {
+              const text = await blob.text();
+              const storedData = JSON.parse(text);
+              
+              if (storedData.transactions && Array.isArray(storedData.transactions)) {
                 // Clear existing transactions and add loaded ones
                 transactions.length = 0;
-                transactions.push(...parsedData.transactions);
-                lastFetchTimestamp = parsedData.lastFetchTimestamp || new Date().toISOString();
-                console.log(`Loaded ${transactions.length} transactions from Vercel KV storage`);
+                transactions.push(...storedData.transactions);
+                lastFetchTimestamp = storedData.lastFetchTimestamp || new Date().toISOString();
+                console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
                 return true;
               }
             }
-          } catch (kvError) {
-            console.error('Error loading from Vercel KV:', kvError);
+          } catch (getBlobError) {
+            console.log('Blob not found or error getting blob:', getBlobError.message);
           }
+        } catch (blobError) {
+          console.error('Error loading from Vercel Blob:', blobError);
         }
         
-        // Try Blob storage if KV is not available or failed
-        if (!STORAGE_CONFIG.vercelKVEnabled && STORAGE_CONFIG.vercelBlobEnabled) {
-          try {
-            const { get } = await import('@vercel/blob');
-            
-            // Get the blob URL
-            const blobUrl = `https://${process.env.VERCEL_URL}/_vercel/blob/${STORAGE_CONFIG.blobStoragePath}`;
-            
-            // Try to fetch the blob
-            try {
-              const response = await fetch(blobUrl);
-              
-              if (response.ok) {
-                const storedData = await response.json();
-                if (storedData.transactions && Array.isArray(storedData.transactions)) {
-                  // Clear existing transactions and add loaded ones
-                  transactions.length = 0;
-                  transactions.push(...storedData.transactions);
-                  lastFetchTimestamp = storedData.lastFetchTimestamp || new Date().toISOString();
-                  console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
-                  return true;
-                }
-              } else {
-                console.log(`Blob not found or error: ${response.status}`);
-              }
-            } catch (fetchError) {
-              console.error('Error fetching from Blob storage:', fetchError);
-            }
-          } catch (blobError) {
-            console.error('Error loading from Vercel Blob:', blobError);
-          }
-        }
-        
-        // If all storage options failed, we'll use fresh data
+        // If Blob storage failed, we'll use fresh data
         return false;
       } else {
         // For local development, load from file
@@ -334,7 +308,7 @@ const storage = {
   // Save transactions to storage
   async save() {
     try {
-      // Only save if we have transactions and enough time has passed since last save
+      // Only save if we have transactions
       if (transactions.length === 0) {
         console.log('No transactions to save');
         return false;
@@ -358,49 +332,27 @@ const storage = {
       };
       
       if (process.env.VERCEL) {
-        // Try KV storage first if available
-        if (STORAGE_CONFIG.vercelKVEnabled) {
-          try {
-            const { createClient } = require('@vercel/kv');
-            const kv = createClient({
-              url: process.env.VERCEL_KV_URL,
-              token: process.env.VERCEL_KV_TOKEN
-            });
-            
-            await kv.set(STORAGE_CONFIG.storageKey, JSON.stringify(dataToStore));
-            STORAGE_CONFIG.lastStorageTime = now;
-            console.log(`Saved ${transactionsToStore.length} transactions to Vercel KV storage`);
-            return true;
-          } catch (kvError) {
-            console.error('Error saving to Vercel KV:', kvError);
-            return false;
-          }
-        } 
-        // Try Blob storage if KV is not available
-        else if (STORAGE_CONFIG.vercelBlobEnabled) {
-          try {
-            const { put } = await import('@vercel/blob');
-            
-            // Convert data to JSON string
-            const jsonData = JSON.stringify(dataToStore);
-            
-            // Create a Blob from the JSON string
-            const blob = new Blob([jsonData], { type: 'application/json' });
-            
-            // Upload to Vercel Blob Storage
-            const { url } = await put(STORAGE_CONFIG.blobStoragePath, blob, {
-              access: 'public',
-            });
-            
-            STORAGE_CONFIG.lastStorageTime = now;
-            console.log(`Saved ${transactionsToStore.length} transactions to Vercel Blob storage at ${url}`);
-            return true;
-          } catch (blobError) {
-            console.error('Error saving to Vercel Blob:', blobError);
-            return false;
-          }
-        } else {
-          console.log('No Vercel storage is enabled, skipping save');
+        // Always use Blob storage in Vercel
+        try {
+          console.log('Attempting to save to Vercel Blob storage...');
+          const { put } = await import('@vercel/blob');
+          
+          // Convert data to JSON string
+          const jsonData = JSON.stringify(dataToStore);
+          
+          // Create a Blob from the JSON string
+          const blob = new Blob([jsonData], { type: 'application/json' });
+          
+          // Upload to Vercel Blob Storage
+          const { url } = await put(STORAGE_CONFIG.blobStoragePath, blob, {
+            access: 'public',
+          });
+          
+          STORAGE_CONFIG.lastStorageTime = now;
+          console.log(`Saved ${transactionsToStore.length} transactions to Vercel Blob storage at ${url}`);
+          return true;
+        } catch (blobError) {
+          console.error('Error saving to Vercel Blob:', blobError);
           return false;
         }
       } else {
@@ -459,9 +411,15 @@ class Transaction {
         transactions.push(this);
         console.log(`Saved new transaction: ${this.signature}`);
         
-        // Try to persist to storage if we have enough new transactions
-        if (transactions.length % 5 === 0) {
-          storage.save().catch(err => console.error('Error auto-saving transactions:', err));
+        // Always try to persist to storage after adding a new transaction
+        if (process.env.VERCEL) {
+          console.log('Saving transaction to persistent storage...');
+          storage.save().catch(err => console.error('Error saving transaction to storage:', err));
+        } else {
+          // For local environment, save less frequently
+          if (transactions.length % 5 === 0) {
+            storage.save().catch(err => console.error('Error auto-saving transactions:', err));
+          }
         }
       }
       
@@ -624,6 +582,19 @@ async function fetchTransactionsVercel(limit = 20) {
     }
     
     console.log(`[Vercel] Successfully processed ${processedTransactions.length} transactions in ${Date.now() - startTime}ms`);
+    
+    // Store the processed transactions in memory
+    if (processedTransactions.length > 0) {
+      // Clear existing transactions and add the new ones
+      transactions.length = 0;
+      transactions.push(...processedTransactions);
+      lastFetchTimestamp = new Date().toISOString();
+      
+      // Save to persistent storage
+      console.log('[Vercel] Saving processed transactions to Blob storage...');
+      await storage.save();
+    }
+    
     return processedTransactions;
   } catch (error) {
     console.error('[Vercel] Error fetching transactions:', error.message);
