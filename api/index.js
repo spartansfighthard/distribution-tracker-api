@@ -274,14 +274,24 @@ const storage = {
                   transactions.push(...storedData.transactions);
                   lastFetchTimestamp = storedData.lastFetchTimestamp || new Date().toISOString();
                   console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
+                  console.log(`Last fetch timestamp: ${lastFetchTimestamp}`);
+                  
+                  // Log transaction types and counts for debugging
+                  const solTransactions = transactions.filter(tx => tx.token === 'SOL');
+                  const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
+                  const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
+                  console.log(`Transaction breakdown: ${solTransactions.length} SOL transactions (${sentTransactions.length} sent, ${receivedTransactions.length} received)`);
                   
                   // If we have fewer than expected transactions, try to fetch more
                   if (transactions.length < 100) {
                     console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
                     // Trigger a fetch of more transactions in the background
-                    fetchAllHistoricalTransactions().catch(err => 
-                      console.error('Error fetching additional historical transactions:', err)
-                    );
+                    // Use setTimeout to ensure this runs after the current function completes
+                    nodeSetTimeout(() => {
+                      fetchAllHistoricalTransactions().catch(err => 
+                        console.error('Error fetching additional historical transactions:', err)
+                      );
+                    }, 100);
                   }
                   
                   return true;
@@ -295,9 +305,11 @@ const storage = {
           } else {
             console.log('Blob not found in the list, will fetch fresh data');
             // If no blob found, trigger a historical fetch
-            fetchAllHistoricalTransactions().catch(err => 
-              console.error('Error fetching historical transactions after blob not found:', err)
-            );
+            nodeSetTimeout(() => {
+              fetchAllHistoricalTransactions().catch(err => 
+                console.error('Error fetching historical transactions after blob not found:', err)
+              );
+            }, 100);
           }
         } catch (blobError) {
           console.error('Error loading from Vercel Blob:', blobError);
@@ -356,7 +368,8 @@ const storage = {
       const dataToStore = {
         transactions: transactionsToStore,
         lastFetchTimestamp,
-        savedAt: new Date().toISOString()
+        savedAt: new Date().toISOString(),
+        transactionCount: transactionsToStore.length
       };
       
       if (process.env.VERCEL) {
@@ -391,6 +404,13 @@ const storage = {
           
           STORAGE_CONFIG.lastStorageTime = now;
           console.log(`Saved ${dataToStore.transactions.length} transactions to Vercel Blob storage at ${url}`);
+          
+          // Log transaction types and counts for debugging
+          const solTransactions = dataToStore.transactions.filter(tx => tx.token === 'SOL');
+          const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
+          const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
+          console.log(`Saved transaction breakdown: ${solTransactions.length} SOL transactions (${sentTransactions.length} sent, ${receivedTransactions.length} received)`);
+          
           return true;
         } catch (blobError) {
           console.error('Error saving to Vercel Blob:', blobError);
@@ -1900,6 +1920,17 @@ async function fetchAllHistoricalTransactions() {
     const existingSignatures = new Set(transactions.map(tx => tx.signature));
     console.log(`[Vercel] Loaded ${existingSignatures.size} existing transaction signatures`);
     
+    // Check if we've recently fetched transactions to avoid unnecessary processing
+    const now = Date.now();
+    const lastFetchTime = lastFetchTimestamp ? new Date(lastFetchTimestamp).getTime() : 0;
+    const timeSinceLastFetch = now - lastFetchTime;
+    
+    // If we've fetched within the last 5 minutes and have more than 40 transactions, skip
+    if (timeSinceLastFetch < 5 * 60 * 1000 && transactions.length > 40) {
+      console.log(`[Vercel] Last fetch was ${Math.round(timeSinceLastFetch / 1000)} seconds ago with ${transactions.length} transactions. Skipping to avoid unnecessary processing.`);
+      return [];
+    }
+    
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
@@ -1974,7 +2005,7 @@ async function fetchAllHistoricalTransactions() {
       
       // Process new signatures - OPTIMIZED VERSION
       // Instead of processing all signatures, just process a small batch to avoid timeouts
-      const maxSignaturesToProcess = Math.min(newSignatures.length, 5); // Process at most 5 signatures per run
+      const maxSignaturesToProcess = Math.min(newSignatures.length, 10); // Increased from 5 to 10 signatures per run
       const batchProcessedTransactions = [];
       const batchStartTime = Date.now();
       
@@ -2086,6 +2117,12 @@ async function fetchAllHistoricalTransactions() {
         // Save to persistent storage
         console.log(`[Vercel] Saving batch ${batchCount} to Blob storage (${transactions.length} total transactions)...`);
         await storage.save();
+        
+        // Log transaction types and counts for debugging
+        const solTransactions = transactions.filter(tx => tx.token === 'SOL');
+        const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
+        const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
+        console.log(`[Vercel] Transaction breakdown after save: ${solTransactions.length} SOL transactions (${sentTransactions.length} sent, ${receivedTransactions.length} received)`);
       }
       
       // If we've processed some signatures but there are more, we'll stop here
@@ -2097,6 +2134,17 @@ async function fetchAllHistoricalTransactions() {
     }
     
     console.log(`[Vercel] Historical fetch complete. Added ${allNewTransactions.length} new transactions in ${batchCount} batches.`);
+    
+    // Schedule another run if we have more signatures to process
+    if (hasMore && allNewTransactions.length > 0) {
+      console.log('[Vercel] Scheduling another historical fetch to process more signatures...');
+      nodeSetTimeout(() => {
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error in scheduled historical transaction fetch:', err)
+        );
+      }, 15000); // Wait 15 seconds before the next run
+    }
+    
     return allNewTransactions;
   } catch (error) {
     console.error('[Vercel] Error in historical transaction fetch:', error.message);
@@ -2260,6 +2308,60 @@ app.get('/api/force-save', asyncHandler(async (req, res) => {
       success: false,
       error: {
         message: 'Failed to force save to Blob storage',
+        details: error.message
+      }
+    });
+  }
+}));
+
+// Add a new endpoint to force a full refresh of all transactions
+app.get('/api/force-refresh', asyncHandler(async (req, res) => {
+  console.log('Forcing full refresh of all transactions...');
+  
+  try {
+    // Clear existing transactions
+    transactions.length = 0;
+    lastFetchTimestamp = null;
+    
+    // Fetch fresh transactions
+    const fetchedTransactions = await fetchTransactionsVercel(100);
+    
+    // Save the fetched transactions to storage
+    if (fetchedTransactions.length > 0) {
+      transactions.push(...fetchedTransactions);
+      lastFetchTimestamp = new Date().toISOString();
+      
+      // Force save to storage
+      const originalInterval = STORAGE_CONFIG.storageInterval;
+      STORAGE_CONFIG.storageInterval = 0;
+      STORAGE_CONFIG.lastStorageTime = null;
+      await storage.save();
+      STORAGE_CONFIG.storageInterval = originalInterval;
+      
+      // Trigger historical fetch to get more data
+      console.log('Triggering historical transaction fetch after force refresh...');
+      fetchAllHistoricalTransactions().catch(err => 
+        console.error('Error fetching historical transactions after force refresh:', err)
+      );
+    }
+    
+    // Return response
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      message: 'Forced full refresh of all transactions',
+      transactionCount: transactions.length,
+      fetchedTransactions: fetchedTransactions.length,
+      note: 'Historical transaction fetch has been triggered to get more data in the background.'
+    });
+  } catch (error) {
+    console.error('Error in /api/force-refresh:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to force refresh all transactions',
         details: error.message
       }
     });
