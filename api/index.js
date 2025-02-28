@@ -274,7 +274,7 @@ const storage = {
                   console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
                   
                   // If we have fewer than expected transactions, try to fetch more
-                  if (transactions.length < 40) {
+                  if (transactions.length < 100) {
                     console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
                     // Trigger a fetch of more transactions in the background
                     fetchAllHistoricalTransactions().catch(err => 
@@ -496,12 +496,12 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
     // For Vercel, we'll fetch transaction details for a larger number of transactions
-    const maxToProcess = Math.min(signatures.length, 50); // Increased from 10 to 50
+    const maxToProcess = Math.min(signatures.length, 100); // Increased from 50 to 100
     const processedTransactions = [];
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 10000; // 10 seconds max processing time
+    const timeLimit = 12000; // 12 seconds max processing time
     
     // Process signatures one by one
     for (let i = 0; i < maxToProcess; i++) {
@@ -630,6 +630,12 @@ async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 10
         // Save to persistent storage
         console.log('[Vercel] Saving all transactions to Blob storage...');
         await storage.save();
+        
+        // After saving initial transactions, trigger historical fetch to get more
+        console.log('[Vercel] Triggering historical transaction fetch to get more data...');
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error fetching historical transactions after initial fetch:', err)
+        );
       } else {
         console.log('[Vercel] No new unique transactions to add');
       }
