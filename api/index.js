@@ -1105,10 +1105,12 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         environment: process.env.NODE_ENV || 'development',
         vercel: true,
         note: "Running in optimized mode for Vercel serverless environment",
-        serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
         stats: {
           ...stats,
-          recentTransactions: fetchedTransactions,
+          totalStoredTransactions: transactions.length,
+          displayedTransactions: fetchedTransactions.length,
+          recentTransactions: fetchedTransactions.slice(0, 10),
+          allTransactions: transactions,
           fetchedAt: new Date().toISOString()
         }
       });
@@ -1192,8 +1194,13 @@ app.get('/api/distributed', asyncHandler(async (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       vercel: true,
       note: "Running in optimized mode for Vercel serverless environment",
-      serverlessNote: "Due to serverless constraints, each request fetches fresh data. This shows only the most recent transactions.",
-      stats,
+      stats: {
+        ...stats,
+        totalStoredTransactions: transactions.length,
+        displayedTransactions: sentTransactions.length,
+        recentDistributions: sentTransactions.slice(0, 10),
+        allDistributions: transactions.filter(tx => tx.type === 'sent' && tx.token === 'SOL')
+      },
       fetchedAt: new Date().toISOString()
     });
   }
