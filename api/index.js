@@ -175,6 +175,7 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL;
 const DISTRIBUTION_WALLET_ADDRESS = process.env.DISTRIBUTION_WALLET_ADDRESS;
 const TAX_TOKEN_MINT_ADDRESS = process.env.TAX_TOKEN_MINT_ADDRESS;
+const TRACKED_TOKEN_MINT_ADDRESS = '6ogzHhzdrQr9Pgv6hZ2MNze7UrzBMAFyBBWUYp1Fhitx';
 
 // Log environment variables for debugging (without exposing sensitive values)
 console.log(`
@@ -957,7 +958,90 @@ function processTransaction(signature, txData) {
       meta: {}
     };
     
-    // Determine transaction type and details
+    // Check for SPL token transfers
+    if (txData.meta.postTokenBalances && txData.meta.preTokenBalances) {
+      const preTokenBalances = txData.meta.preTokenBalances;
+      const postTokenBalances = txData.meta.postTokenBalances;
+      
+      // Look for our tracked token
+      const trackedTokenPreBalances = preTokenBalances.filter(
+        balance => balance.mint === TRACKED_TOKEN_MINT_ADDRESS
+      );
+      
+      const trackedTokenPostBalances = postTokenBalances.filter(
+        balance => balance.mint === TRACKED_TOKEN_MINT_ADDRESS
+      );
+      
+      if (trackedTokenPreBalances.length > 0 || trackedTokenPostBalances.length > 0) {
+        console.log(`Found transaction involving tracked token: ${signature}`);
+        
+        // Map account indices to their balances
+        const preBalanceMap = {};
+        trackedTokenPreBalances.forEach(balance => {
+          preBalanceMap[balance.accountIndex] = BigInt(balance.uiTokenAmount.amount);
+        });
+        
+        const postBalanceMap = {};
+        trackedTokenPostBalances.forEach(balance => {
+          postBalanceMap[balance.accountIndex] = BigInt(balance.uiTokenAmount.amount);
+        });
+        
+        // Find the distribution wallet's index
+        const accountKeys = txData.transaction.message.accountKeys;
+        const walletIndex = accountKeys.findIndex(key => 
+          key.pubkey === DISTRIBUTION_WALLET_ADDRESS
+        );
+        
+        if (walletIndex >= 0) {
+          const walletPreBalance = preBalanceMap[walletIndex] || BigInt(0);
+          const walletPostBalance = postBalanceMap[walletIndex] || BigInt(0);
+          
+          if (walletPostBalance > walletPreBalance) {
+            // Wallet received tokens
+            const amount = Number(walletPostBalance - walletPreBalance) / 1e9; // Adjust decimals as needed
+            
+            transaction.type = 'received';
+            transaction.amount = amount;
+            transaction.token = TRACKED_TOKEN_MINT_ADDRESS;
+            transaction.tokenMint = TRACKED_TOKEN_MINT_ADDRESS;
+            transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
+            
+            // Try to determine sender
+            for (let i = 0; i < accountKeys.length; i++) {
+              if (i !== walletIndex && preBalanceMap[i] && postBalanceMap[i] && preBalanceMap[i] > postBalanceMap[i]) {
+                transaction.sender = accountKeys[i].pubkey;
+                break;
+              }
+            }
+            
+            console.log(`Wallet received ${amount} of tracked token`);
+            return transaction;
+          } else if (walletPreBalance > walletPostBalance) {
+            // Wallet sent tokens
+            const amount = Number(walletPreBalance - walletPostBalance) / 1e9; // Adjust decimals as needed
+            
+            transaction.type = 'sent';
+            transaction.amount = amount;
+            transaction.token = TRACKED_TOKEN_MINT_ADDRESS;
+            transaction.tokenMint = TRACKED_TOKEN_MINT_ADDRESS;
+            transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
+            
+            // Try to determine receiver
+            for (let i = 0; i < accountKeys.length; i++) {
+              if (i !== walletIndex && preBalanceMap[i] && postBalanceMap[i] && preBalanceMap[i] < postBalanceMap[i]) {
+                transaction.receiver = accountKeys[i].pubkey;
+                break;
+              }
+            }
+            
+            console.log(`Wallet sent ${amount} of tracked token`);
+            return transaction;
+          }
+        }
+      }
+    }
+    
+    // Continue with existing SOL transfer logic
     const preBalances = txData.meta.preBalances;
     const postBalances = txData.meta.postBalances;
     const accountKeys = txData.transaction.message.accountKeys;
@@ -2522,4 +2606,92 @@ app.get('/api/*', (req, res) => {
       '/'
     ]
   });
+});
+
+// Get statistics for the tracked token
+function getTrackedTokenStats() {
+  try {
+    console.log(`Getting statistics for tracked token: ${TRACKED_TOKEN_MINT_ADDRESS}`);
+    
+    // Filter transactions for our tracked token
+    const tokenTransactions = transactions.filter(tx => 
+      tx.token === TRACKED_TOKEN_MINT_ADDRESS || tx.tokenMint === TRACKED_TOKEN_MINT_ADDRESS
+    );
+    
+    // Calculate statistics
+    const sent = tokenTransactions.filter(tx => tx.type === 'sent');
+    const received = tokenTransactions.filter(tx => tx.type === 'received');
+    
+    const totalSent = sent.reduce((sum, tx) => sum + tx.amount, 0);
+    const totalReceived = received.reduce((sum, tx) => sum + tx.amount, 0);
+    
+    // Get unique senders and receivers
+    const uniqueSenders = new Set();
+    const uniqueReceivers = new Set();
+    
+    sent.forEach(tx => {
+      if (tx.receiver) uniqueReceivers.add(tx.receiver);
+    });
+    
+    received.forEach(tx => {
+      if (tx.sender) uniqueSenders.add(tx.sender);
+    });
+    
+    return {
+      tokenMint: TRACKED_TOKEN_MINT_ADDRESS,
+      totalTransactions: tokenTransactions.length,
+      sentTransactions: sent.length,
+      receivedTransactions: received.length,
+      totalSent,
+      totalReceived,
+      balance: totalReceived - totalSent,
+      uniqueSenders: Array.from(uniqueSenders),
+      uniqueReceivers: Array.from(uniqueReceivers),
+      uniqueSendersCount: uniqueSenders.size,
+      uniqueReceiversCount: uniqueReceivers.size,
+      lastUpdated: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error(`Error getting tracked token stats:`, error);
+    return {
+      tokenMint: TRACKED_TOKEN_MINT_ADDRESS,
+      error: error.message
+    };
+  }
+}
+
+// API endpoint for tracked token statistics
+app.get('/api/tracked-token', async (req, res) => {
+  try {
+    // Check if data collection is disabled
+    if (process.env.DISABLE_DATA_COLLECTION === 'true') {
+      return res.json({
+        success: false,
+        message: "Data collection temporarily disabled",
+        maintenance: true
+      });
+    }
+    
+    // If we don't have any transactions, fetch them first
+    if (transactions.length === 0) {
+      await fetchTransactions();
+    }
+    
+    const stats = getTrackedTokenStats();
+    
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      data: stats
+    });
+  } catch (error) {
+    console.error('Error getting tracked token statistics:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to get tracked token statistics',
+        details: error.message
+      }
+    });
+  }
 });
