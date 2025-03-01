@@ -2603,20 +2603,46 @@ app.get('/api/*', (req, res) => {
       '/api/fetch-status',
       '/api/force-save',
       '/api/force-refresh',
+      '/api/tracked-token',
+      '/api/tracked-token/transactions',
       '/'
     ]
   });
 });
 
 // Get statistics for the tracked token
-function getTrackedTokenStats() {
+async function getTrackedTokenStats() {
   try {
     console.log(`Getting statistics for tracked token: ${TRACKED_TOKEN_MINT_ADDRESS}`);
     
-    // Filter transactions for our tracked token
-    const tokenTransactions = transactions.filter(tx => 
-      tx.token === TRACKED_TOKEN_MINT_ADDRESS || tx.tokenMint === TRACKED_TOKEN_MINT_ADDRESS
-    );
+    let tokenTransactions = [];
+    
+    // Try to get transactions from MongoDB first
+    try {
+      // Create a Transaction instance to access static methods
+      const Transaction = require('../src/models/Transaction');
+      
+      // Use the getByTokenMint method to retrieve transactions
+      tokenTransactions = await Transaction.getByTokenMint(TRACKED_TOKEN_MINT_ADDRESS);
+      
+      // If that fails, try querying by token field as well
+      if (!tokenTransactions || tokenTransactions.length === 0) {
+        const tokenFieldTransactions = await Transaction.getByToken(TRACKED_TOKEN_MINT_ADDRESS);
+        if (tokenFieldTransactions && tokenFieldTransactions.length > 0) {
+          tokenTransactions = tokenFieldTransactions;
+        }
+      }
+      
+      console.log(`Retrieved ${tokenTransactions.length} tracked token transactions from database`);
+    } catch (error) {
+      console.warn(`Failed to retrieve tracked token transactions from database: ${error.message}`);
+      
+      // Fall back to in-memory filtering
+      tokenTransactions = transactions.filter(tx => 
+        tx.token === TRACKED_TOKEN_MINT_ADDRESS || tx.tokenMint === TRACKED_TOKEN_MINT_ADDRESS
+      );
+      console.log(`Retrieved ${tokenTransactions.length} tracked token transactions from memory`);
+    }
     
     // Calculate statistics
     const sent = tokenTransactions.filter(tx => tx.type === 'sent');
@@ -2677,7 +2703,7 @@ app.get('/api/tracked-token', async (req, res) => {
       await fetchTransactions();
     }
     
-    const stats = getTrackedTokenStats();
+    const stats = await getTrackedTokenStats();
     
     res.json({
       success: true,
@@ -2690,6 +2716,75 @@ app.get('/api/tracked-token', async (req, res) => {
       success: false,
       error: {
         message: 'Failed to get tracked token statistics',
+        details: error.message
+      }
+    });
+  }
+});
+
+// API endpoint for tracked token transactions
+app.get('/api/tracked-token/transactions', async (req, res) => {
+  try {
+    // Check if data collection is disabled
+    if (process.env.DISABLE_DATA_COLLECTION === 'true') {
+      return res.json({
+        success: false,
+        message: "Data collection temporarily disabled",
+        maintenance: true
+      });
+    }
+    
+    // Get limit from query params, default to 100
+    const limit = parseInt(req.query.limit) || 100;
+    
+    let tokenTransactions = [];
+    
+    // Try to get transactions from MongoDB first
+    try {
+      // Create a Transaction instance to access static methods
+      const Transaction = require('../src/models/Transaction');
+      
+      // Use the getByTokenMint method to retrieve transactions
+      tokenTransactions = await Transaction.getByTokenMint(TRACKED_TOKEN_MINT_ADDRESS);
+      
+      // If that fails, try querying by token field as well
+      if (!tokenTransactions || tokenTransactions.length === 0) {
+        const tokenFieldTransactions = await Transaction.getByToken(TRACKED_TOKEN_MINT_ADDRESS);
+        if (tokenFieldTransactions && tokenFieldTransactions.length > 0) {
+          tokenTransactions = tokenFieldTransactions;
+        }
+      }
+      
+      console.log(`Retrieved ${tokenTransactions.length} tracked token transactions from database`);
+    } catch (error) {
+      console.warn(`Failed to retrieve tracked token transactions from database: ${error.message}`);
+      
+      // Fall back to in-memory filtering
+      tokenTransactions = transactions.filter(tx => 
+        tx.token === TRACKED_TOKEN_MINT_ADDRESS || tx.tokenMint === TRACKED_TOKEN_MINT_ADDRESS
+      );
+      console.log(`Retrieved ${tokenTransactions.length} tracked token transactions from memory`);
+    }
+    
+    // Sort by blockTime descending (newest first)
+    tokenTransactions.sort((a, b) => b.blockTime - a.blockTime);
+    
+    // Limit the number of transactions returned
+    const limitedTransactions = tokenTransactions.slice(0, limit);
+    
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      count: limitedTransactions.length,
+      total: tokenTransactions.length,
+      transactions: limitedTransactions
+    });
+  } catch (error) {
+    console.error('Error getting tracked token transactions:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to get tracked token transactions',
         details: error.message
       }
     });
