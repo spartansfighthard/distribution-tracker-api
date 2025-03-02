@@ -58,7 +58,17 @@ function formatSol(lamports) {
 // Helper function to fetch data from API
 async function fetchFromAPI(endpoint) {
   try {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`);
+    // Add API key to the request if available
+    const apiKey = process.env.API_KEY;
+    const headers = {
+      'User-Agent': 'TelegramBot',
+    };
+    
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+    
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, { headers });
     if (!response.ok) {
       throw new Error(`API returned ${response.status}: ${response.statusText}`);
     }
@@ -72,7 +82,17 @@ async function fetchFromAPI(endpoint) {
 // Fetch stats with a limit parameter to avoid timeouts
 async function fetchStats() {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/stats?limit=50`);
+    // Add API key to the request if available
+    const apiKey = process.env.API_KEY;
+    const headers = {
+      'User-Agent': 'TelegramBot',
+    };
+    
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+    
+    const response = await fetch(`${API_BASE_URL}/api/stats?limit=50`, { headers });
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(`API error: ${errorData.error?.message || 'Unknown error'}`);
@@ -80,6 +100,10 @@ async function fetchStats() {
     return await response.json();
   } catch (error) {
     console.error('Error fetching stats:', error.message);
+    // Add more detailed error information
+    if (error.message.includes('timeout') || error.message.includes('15s limit')) {
+      throw new Error('The API is currently experiencing high load. Please try again later or use commands that don\'t require full statistics.');
+    }
     throw error;
   }
 }
@@ -87,7 +111,17 @@ async function fetchStats() {
 // Update the fetchBalance function to include a limit parameter
 async function fetchBalance() {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/stats?limit=50`);
+    // Add API key to the request if available
+    const apiKey = process.env.API_KEY;
+    const headers = {
+      'User-Agent': 'TelegramBot',
+    };
+    
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+    
+    const response = await fetch(`${API_BASE_URL}/api/stats?limit=50`, { headers });
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(`API error: ${errorData.error?.message || 'Unknown error'}`);
@@ -135,7 +169,17 @@ async function fetchTransactionCount() {
 // Add a new function to fetch wallet data
 async function fetchWalletData(walletAddress) {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/wallet?address=${walletAddress}&limit=50`);
+    // Add API key to the request if available
+    const apiKey = process.env.API_KEY;
+    const headers = {
+      'User-Agent': 'TelegramBot',
+    };
+    
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+    
+    const response = await fetch(`${API_BASE_URL}/api/wallet?address=${walletAddress}&limit=50`, { headers });
     if (!response.ok) {
       const errorData = await response.json();
       throw new Error(`API error: ${errorData.error?.message || 'Unknown error'}`);
@@ -153,16 +197,17 @@ bot.onText(/\/start/, async (msg) => {
   
   bot.sendMessage(
     chatId,
-    `👋 Welcome to the SOL Distribution Tracker Bot!\n\n` +
+    `👋 *Welcome to the SOL Distribution Tracker Bot!*\n\n` +
     `This bot helps you track SOL distributions from the main wallet.\n\n` +
-    `Available commands:\n` +
-    `/stats - Get current distribution statistics\n` +
-    `/balance - Check current wallet balance\n` +
-    `/balance <address> - Check any wallet's balance and rewards\n` +
-    `/distributed - View total distributed amount\n` +
-    `/transactions - Get recent transaction count\n` +
-    `/refresh - Force refresh transaction data\n` +
-    `/help - Show this help message`
+    `📋 *Available commands:*\n` +
+    `📊 /stats - Get current distribution statistics\n` +
+    `💰 /balance - Check current wallet balance\n` +
+    `👛 /balance <address> - Check any wallet's balance and rewards\n` +
+    `💸 /distributed - View total distributed amount\n` +
+    `📝 /transactions - Get recent transaction count\n` +
+    `🔄 /refresh - Force refresh transaction data\n` +
+    `❓ /help - Show this help message`,
+    { parse_mode: 'Markdown' }
   );
 });
 
@@ -173,15 +218,15 @@ bot.onText(/\/help/, (msg) => {
   bot.sendMessage(
     chatId,
     `📚 *SOL Distribution Tracker Bot Commands*\n\n` +
-    `/stats - Get current distribution statistics\n` +
-    `/balance - Check current wallet balance\n` +
-    `/balance <address> - Check any wallet's balance and rewards\n` +
-    `/distributed - View total distributed amount\n` +
-    `/transactions - Get recent transaction count\n` +
-    `/refresh - Force refresh transaction data\n` +
-    `/help - Show this help message\n\n` +
-    `Data is sourced from the production API at:\n` +
-    `${API_BASE_URL}`,
+    `📊 /stats - Get current distribution statistics\n` +
+    `💰 /balance - Check current wallet balance\n` +
+    `👛 /balance <address> - Check any wallet's balance and rewards\n` +
+    `💸 /distributed - View total distributed amount\n` +
+    `📝 /transactions - Get recent transaction count\n` +
+    `🔄 /refresh - Force refresh transaction data\n` +
+    `❓ /help - Show this help message\n\n` +
+    `🌐 *Data Source:*\n` +
+    `API URL: ${API_BASE_URL}`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -204,31 +249,31 @@ bot.onText(/\/stats/, async (msg) => {
     
     const message = 
       `📊 *SOL DISTRIBUTION STATISTICS*\n\n` +
-      `💰 *Financial Summary*\n` +
-      `• Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
-      `• Total Received: ${formatSol(stats.totalSolReceived)} SOL\n` +
-      `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
-      `📝 *Transaction Details*\n` +
-      `• Total Transactions: ${stats.totalTransactions}\n` +
-      `• Sent Transactions: ${counts.sentTransactions}\n` +
-      `• Received Transactions: ${counts.receivedTransactions}\n` +
-      `• SOL Transactions: ${counts.solTransactions}\n` +
-      `• Stored Transactions: ${counts.totalStoredTransactions}\n\n` +
-      `🔗 *Wallet Information*\n` +
-      `• Address: \`${stats.distributionWallet}\`\n` +
-      `• [View on Solscan](${stats.solscanLink})\n\n` +
-      `🔄 *Last Updated:* ${new Date(data.fetchedAt).toLocaleString()}\n\n` +
-      `_Environment: ${data.environment} | API Version: ${data.vercel ? 'Vercel' : 'Standard'}_`;
+      `💸 *Financial Summary*\n` +
+      `• 🔄 Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
+      `• ⬇️ Total Received: ${formatSol(stats.totalSolReceived)} SOL\n` +
+      `• 💎 Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
+      `📝 *Transaction Summary*\n` +
+      `• 🧮 Total Transactions: ${stats.totalTransactions}\n` +
+      `• ↗️ Sent Transactions: ${counts.sentTransactions}\n` +
+      `• ↘️ Received Transactions: ${counts.receivedTransactions}\n` +
+      `• ⚡ SOL Transactions: ${counts.solTransactions}\n` +
+      `• 💾 Stored Transactions: ${counts.totalStoredTransactions}\n\n` +
+      `🔗 *Wallet Details*\n` +
+      `• 🌐 [View Transactions on Solscan](${stats.solscanLink})\n\n` +
+      `🔄 *Last Updated:* ${new Date(data.fetchedAt).toLocaleString()}`;
     
-    bot.sendMessage(chatId, message, { 
-      parse_mode: 'Markdown',
-      disable_web_page_preview: false
-    });
+    bot.sendMessage(chatId, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
   } catch (error) {
-    bot.sendMessage(
-      chatId, 
-      `❌ Error fetching statistics: ${error.message}\n\nThe stats endpoint might be timing out due to Vercel's 15-second limit for serverless functions.`
-    );
+    console.error('Error in stats command:', error.message);
+    let errorMessage = '❌ Error fetching statistics. Please try again later.';
+    
+    // Provide more helpful message for timeout errors
+    if (error.message.includes('high load') || error.message.includes('timeout') || error.message.includes('15s limit')) {
+      errorMessage = '⏱️ *API Timeout Error*\n\nThe API is currently experiencing high load and reached the timeout limit. You can:\n\n• Try again later\n• Use simpler commands like /balance\n• Check the Solscan link directly';
+    }
+    
+    bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
   }
 });
 
@@ -253,14 +298,14 @@ bot.onText(/\/balance(?:\s+([a-zA-Z0-9]{32,44}))?/, async (msg, match) => {
         const message = 
           `💼 *WALLET DETAILS: CUSTOM SEARCH*\n\n` +
           `🔍 *Searched Address*\n` +
-          `• Address: \`${walletAddress}\`\n` +
-          `• [View on Solscan](https://solscan.io/account/${walletAddress})\n\n` +
+          `• 👛 Address: \`${walletAddress}\`\n` +
+          `• 🌐 [View on Solscan](https://solscan.io/account/${walletAddress})\n\n` +
           `💰 *Balance Information*\n` +
-          `• Current Balance: ${formatSol(data.balance || "0")} SOL\n\n` +
+          `• ⚖️ Current Balance: ${formatSol(data.balance || "0")} SOL\n\n` +
           `📊 *Transaction Summary*\n` +
-          `• Total Received: ${formatSol(data.totalReceived || "0")} SOL\n` +
-          `• Total Sent: ${formatSol(data.totalSent || "0")} SOL\n` +
-          `• Total Rewards: ${formatSol(data.totalRewards || "0")} SOL\n\n` +
+          `• ⬇️ Total Received: ${formatSol(data.totalReceived || "0")} SOL\n` +
+          `• ↗️ Total Sent: ${formatSol(data.totalSent || "0")} SOL\n` +
+          `• ✨ Total Rewards: ${formatSol(data.totalRewards || "0")} SOL\n\n` +
           `🔄 *Last Updated:* ${new Date().toLocaleString()}`;
         
         bot.sendMessage(chatId, message, { 
@@ -297,11 +342,11 @@ bot.onText(/\/balance(?:\s+([a-zA-Z0-9]{32,44}))?/, async (msg, match) => {
         `💼 *WALLET BALANCE SUMMARY*\n\n` +
         `💰 *Current Balance:* ${formatSol(stats.currentSolBalance)} SOL\n\n` +
         `📊 *Additional Information*\n` +
-        `• Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
-        `• Total Received: ${formatSol(stats.totalSolReceived)} SOL\n\n` +
+        `• 🔄 Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
+        `• ⬇️ Total Received: ${formatSol(stats.totalSolReceived)} SOL\n\n` +
         `🔗 *Wallet Details*\n` +
-        `• Address: \`${stats.distributionWallet}\`\n` +
-        `• [View on Solscan](${stats.solscanLink})\n\n` +
+        `• 👛 Address: \`${stats.distributionWallet}\`\n` +
+        `• 🌐 [View on Solscan](${stats.solscanLink})\n\n` +
         `🔄 *Last Updated:* ${new Date(statsData.fetchedAt).toLocaleString()}\n\n` +
         `💡 *Tip:* Use \`/balance <wallet_address>\` to check any wallet's balance and rewards.`;
       
@@ -344,11 +389,11 @@ bot.onText(/\/distributed/, async (msg) => {
       `💸 *DISTRIBUTION SUMMARY*\n\n` +
       `💰 *Total Distributed:* ${formatSol(stats.totalSolDistributed)} SOL\n\n` +
       `📊 *Distribution Details*\n` +
-      `• Sent Transactions: ${counts.sentTransactions}\n` +
-      `• Average Per Transaction: ${formatSol(avgDistribution.toString())} SOL\n\n` +
+      `• ↗️ Sent Transactions: ${counts.sentTransactions}\n` +
+      `• ⚖️ Average Per Transaction: ${formatSol(avgDistribution.toString())} SOL\n\n` +
       `💼 *Wallet Status*\n` +
-      `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n` +
-      `• Total Received: ${formatSol(stats.totalSolReceived)} SOL\n\n` +
+      `• 💎 Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n` +
+      `• ⬇️ Total Received: ${formatSol(stats.totalSolReceived)} SOL\n\n` +
       `🔄 *Last Updated:* ${new Date(statsData.fetchedAt).toLocaleString()}`;
     
     bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -384,17 +429,17 @@ bot.onText(/\/transactions/, async (msg) => {
     const message = 
       `📝 *TRANSACTION SUMMARY*\n\n` +
       `📊 *Transaction Counts*\n` +
-      `• Total Transactions: ${stats.totalTransactions}\n` +
-      `• Sent Transactions: ${counts.sentTransactions} (${sentPercentage}%)\n` +
-      `• Received Transactions: ${counts.receivedTransactions} (${receivedPercentage}%)\n` +
-      `• SOL Transactions: ${counts.solTransactions}\n` +
-      `• Stored Transactions: ${counts.totalStoredTransactions}\n\n` +
+      `• 🧮 Total Transactions: ${stats.totalTransactions}\n` +
+      `• ↗️ Sent Transactions: ${counts.sentTransactions} (${sentPercentage}%)\n` +
+      `• ↘️ Received Transactions: ${counts.receivedTransactions} (${receivedPercentage}%)\n` +
+      `• ⚡ SOL Transactions: ${counts.solTransactions}\n` +
+      `• 💾 Stored Transactions: ${counts.totalStoredTransactions}\n\n` +
       `💰 *Financial Impact*\n` +
-      `• Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
-      `• Total Received: ${formatSol(stats.totalSolReceived)} SOL\n` +
-      `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
+      `• 🔄 Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
+      `• ⬇️ Total Received: ${formatSol(stats.totalSolReceived)} SOL\n` +
+      `• 💎 Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
       `🔗 *Wallet Details*\n` +
-      `• [View Transactions on Solscan](${stats.solscanLink})\n\n` +
+      `• 🌐 [View Transactions on Solscan](${stats.solscanLink})\n\n` +
       `🔄 *Last Updated:* ${new Date(statsData.fetchedAt).toLocaleString()}`;
     
     bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -410,8 +455,18 @@ bot.onText(/\/refresh/, async (msg) => {
   try {
     bot.sendMessage(chatId, '⏳ Forcing refresh of transaction data...');
     
+    // Add API key to the request if available
+    const apiKey = process.env.API_KEY;
+    const headers = {
+      'User-Agent': 'TelegramBot',
+    };
+    
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+    
     // Call the force-refresh endpoint with a limit parameter
-    const response = await fetch(`${API_BASE_URL}/api/force-refresh?limit=50`);
+    const response = await fetch(`${API_BASE_URL}/api/force-refresh?limit=50`, { headers });
     
     if (!response.ok) {
       const errorData = await response.json();
@@ -432,36 +487,32 @@ bot.onText(/\/refresh/, async (msg) => {
         const stats = statsData.stats;
         const counts = statsData.transactionCounts;
         statsMessage = `\n\n📊 *Updated Statistics*\n` +
-          `• Total Transactions: ${stats.totalTransactions}\n` +
-          `• Sent Transactions: ${counts.sentTransactions}\n` +
-          `• Received Transactions: ${counts.receivedTransactions}\n` +
-          `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL`;
+          `• 🧮 Total Transactions: ${stats.totalTransactions}\n` +
+          `• ↗️ Sent Transactions: ${counts.sentTransactions}\n` +
+          `• ↘️ Received Transactions: ${counts.receivedTransactions}\n` +
+          `• 💎 Current Balance: ${formatSol(stats.currentSolBalance)} SOL`;
       }
-    } catch (statsError) {
-      console.error('Error fetching updated stats after refresh:', statsError);
-      statsMessage = '\n\nCould not fetch updated statistics. Please use /stats to see the latest data.';
+    } catch (error) {
+      console.error('Error fetching updated stats after refresh:', error);
+      statsMessage = '\n\n⚠️ *Note:* Could not fetch updated statistics due to API timeout. The refresh was still successful.';
     }
     
-    bot.sendMessage(
-      chatId, 
-      `✅ *REFRESH SUCCESSFUL*\n\n` +
-      `🔄 *Refresh Details*\n` +
-      `• Status: Success\n` +
-      `• Timestamp: ${new Date(data.timestamp).toLocaleString()}\n` +
-      `• Environment: ${data.environment}\n` +
-      `• Note: ${data.note || 'Transactions cleared and will be fetched on next cycle'}` +
-      `${statsMessage}\n\n` +
-      `Use /stats to see complete statistics.`,
-      { parse_mode: 'Markdown' }
-    );
+    const message = `✅ *Refresh Complete!*\n\n` +
+      `Successfully refreshed transaction data.\n` +
+      `• 🔄 Transactions processed: ${data.processedCount}\n` +
+      `• ⏱️ Processing time: ${data.processingTime}s${statsMessage}`;
+    
+    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
   } catch (error) {
-    bot.sendMessage(
-      chatId, 
-      `❌ *REFRESH FAILED*\n\n` +
-      `Error: ${error.message}\n\n` +
-      `The refresh endpoint might be timing out due to Vercel's 15-second limit for serverless functions.`,
-      { parse_mode: 'Markdown' }
-    );
+    console.error('Error in refresh command:', error.message);
+    let errorMessage = '❌ Error refreshing data. Please try again later.';
+    
+    // Provide more helpful message for timeout errors
+    if (error.message.includes('high load') || error.message.includes('timeout') || error.message.includes('15s limit')) {
+      errorMessage = '⏱️ *API Timeout Error*\n\nThe refresh operation timed out due to high server load. The API has a 15-second execution limit.\n\nYou can try again later when the server load is lower.';
+    }
+    
+    bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
   }
 });
 
