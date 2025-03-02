@@ -5,8 +5,6 @@
     "buildCommand": "npm install"
   },
   "deploy": {
-    "startCommand": "node railway-deploy.js",
-    "restartPolicyType": "on-failure",
-    "restartPolicyMaxRetries": 10
+    "startCommand": "node railway-deploy.js"
   }
 } 
