@@ -1,51 +1,81 @@
 # Deploying the Telegram Bot to Railway
 
-This guide will walk you through deploying your SOL Distribution Tracker Telegram bot to Railway.app.
+This guide provides step-by-step instructions for deploying the SOL Distribution Tracker Telegram Bot to Railway.
 
 ## Prerequisites
 
-- A [Railway.app](https://railway.app/) account
-- Your GitHub repository connected to Railway
-- Your Telegram bot token (from BotFather)
-- Your API key for accessing the Distribution Tracker API
+1. A Railway account (https://railway.app/)
+2. Git installed on your local machine
+3. The Railway CLI (optional but recommended)
 
 ## Deployment Steps
 
-### 1. Connect Your Repository to Railway
+### 1. Install Railway CLI (Optional)
 
-1. Log in to [Railway.app](https://railway.app/)
-2. Click "New Project" and select "Deploy from GitHub repo"
-3. Select your repository from the list
-4. Railway will automatically detect your Procfile and package.json
+```bash
+npm i -g @railway/cli
+```
 
-### 2. Configure Environment Variables
+### 2. Login to Railway
 
-Add the following environment variables in the Railway dashboard:
+```bash
+railway login
+```
+
+### 3. Initialize a New Project
+
+```bash
+railway init
+```
+
+### 4. Link Your Repository
+
+```bash
+railway link
+```
+
+### 5. Set Environment Variables
+
+Set the following environment variables in the Railway dashboard:
 
 - `TELEGRAM_BOT_TOKEN`: Your Telegram bot token from BotFather
-- `API_BASE_URL`: The URL of your API (e.g., https://distribution-tracker-api.vercel.app)
-- `API_KEY`: Your API key for authentication
+- `API_BASE_URL`: The URL of your Vercel API (e.g., https://distribution-tracker-api.vercel.app)
+- `API_KEY`: Your API key (if required)
 
-To add environment variables:
-1. Go to your project in Railway
-2. Click on the "Variables" tab
-3. Add each variable with its corresponding value
+### 6. Deploy the Bot
 
-### 3. Deploy Your Bot
-
-1. Railway will automatically deploy your bot when you push changes to your repository
-2. You can also manually trigger a deployment from the Railway dashboard
-
-### 4. Verify Deployment
-
-1. Check the logs in the Railway dashboard to ensure your bot is running correctly
-2. Test your bot by sending commands to it in Telegram
+```bash
+railway up
+```
 
 ## Troubleshooting
 
-- **Bot not responding**: Check the logs in Railway for any errors
-- **Connection issues**: Verify that your API_BASE_URL is correct and accessible
-- **Authentication errors**: Ensure your API_KEY is correctly set in the environment variables
+### Bot Not Responding
+
+1. Check the Railway logs for any errors
+2. Verify that all environment variables are set correctly
+3. Make sure the Vercel API is accessible from Railway
+
+### Connection Issues
+
+If the bot can't connect to the Vercel API:
+
+1. Check if the API is running by visiting the health endpoint: `{API_BASE_URL}/api/health`
+2. Verify that CORS is properly configured on the API
+3. Check for any rate limiting or timeout issues
+
+## Maintenance
+
+### Updating the Bot
+
+To update the bot with new changes:
+
+1. Push your changes to the repository
+2. Railway will automatically redeploy the bot
+
+### Monitoring
+
+Monitor the bot's performance using Railway's built-in metrics and logs.
 
 ## Additional Information
 

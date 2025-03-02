@@ -10,6 +10,27 @@ app.use(cors());
 module.exports = async (req, res) => {
   console.log('Forcing full refresh of all transactions (serverless function)...');
   
+  // API Key Authentication
+  const apiKey = req.headers['x-api-key'] || req.query.api_key;
+  const validApiKey = process.env.API_KEY;
+  
+  // Skip API key validation for the Telegram bot
+  const isTelegramBot = req.headers['user-agent']?.includes('TelegramBot');
+  const isLocalRequest = req.headers['x-forwarded-for'] === '127.0.0.1' || req.connection.remoteAddress === '127.0.0.1';
+  
+  // Force-refresh is a sensitive operation, so always require authentication if API key is configured
+  if (validApiKey && !isTelegramBot && !isLocalRequest) {
+    if (!apiKey || apiKey !== validApiKey) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          message: 'Unauthorized: Invalid or missing API key',
+          code: 401
+        }
+      });
+    }
+  }
+  
   try {
     // Clear transactions by storing an empty array in Vercel Blob storage
     const emptyTransactions = [];

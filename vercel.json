@@ -12,6 +12,10 @@
     {
       "src": "api/wallet.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "api/stop-collection.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
@@ -22,6 +26,10 @@
     {
       "src": "/api/wallet",
       "dest": "/api/wallet.js"
+    },
+    {
+      "src": "/api/admin/stop-collection",
+      "dest": "/api/stop-collection.js"
     },
     {
       "src": "/(.*)",

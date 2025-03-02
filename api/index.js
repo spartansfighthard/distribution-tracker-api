@@ -21,6 +21,14 @@ const STORAGE_CONFIG = {
   lastStorageTime: null
 };
 
+// Stop collection configuration
+const STOP_COLLECTION_CONFIG = {
+  flagFilePath: path.join(process.cwd(), 'data', 'stop_collection.flag'),
+  checkInterval: 30 * 1000, // Check for stop flag every 30 seconds
+  isStopRequested: false,
+  lastCheckTime: null
+};
+
 // Updated configuration for better rate limiting (2025-02-28)
 const CONFIG = {
   // API rate limiting
@@ -233,7 +241,8 @@ const backgroundJobState = {
   lastRunTime: null,
   consecutiveErrors: 0,
   currentInterval: CONFIG.backgroundJobs.autoFetchInterval,
-  timerId: null
+  timerId: null,
+  isStopped: false // Add flag to track if collection is stopped
 };
 
 // Constants
@@ -2833,12 +2842,58 @@ async function initializeApp() {
   }
 }
 
+// Function to check if data collection should be stopped
+async function checkStopCollectionFlag() {
+  try {
+    // Check if the flag file exists
+    try {
+      await fs.access(STOP_COLLECTION_CONFIG.flagFilePath);
+      
+      // If we reach here, the file exists
+      // Read the file to get the reason
+      const flagData = await fs.readFile(STOP_COLLECTION_CONFIG.flagFilePath, 'utf8');
+      let stopReason = 'Unknown reason';
+      
+      try {
+        const parsedData = JSON.parse(flagData);
+        stopReason = parsedData.reason || stopReason;
+      } catch (parseError) {
+        console.warn('Could not parse stop flag file data:', parseError);
+      }
+      
+      // Set the global stop flag
+      if (!STOP_COLLECTION_CONFIG.isStopRequested) {
+        console.log(`Data collection stop requested: ${stopReason}`);
+        STOP_COLLECTION_CONFIG.isStopRequested = true;
+        backgroundJobState.isStopped = true;
+      }
+      
+      return true;
+    } catch (accessError) {
+      // File doesn't exist, collection should continue
+      return false;
+    }
+  } catch (error) {
+    console.error('Error checking stop collection flag:', error);
+    return false;
+  } finally {
+    STOP_COLLECTION_CONFIG.lastCheckTime = new Date();
+  }
+}
+
 // Function to start background jobs
 function startBackgroundJobs() {
   console.log('Starting background jobs for continuous data collection...');
   
   // Function to run the auto-fetch job
   async function runAutoFetchJob() {
+    // Check if data collection should be stopped
+    if (await checkStopCollectionFlag()) {
+      console.log('Data collection has been stopped. Background jobs will not run.');
+      backgroundJobState.isRunning = false;
+      return;
+    }
+    
     if (backgroundJobState.isRunning) {
       console.log('Auto-fetch job already running, skipping this run');
       return;
@@ -2883,13 +2938,22 @@ function startBackgroundJobs() {
       backgroundJobState.isRunning = false;
       backgroundJobState.lastRunTime = new Date();
       
-      // Schedule the next run
-      backgroundJobState.timerId = setTimeout(runAutoFetchJob, backgroundJobState.currentInterval);
+      // Schedule the next run only if not stopped
+      if (!backgroundJobState.isStopped) {
+        backgroundJobState.timerId = setTimeout(runAutoFetchJob, backgroundJobState.currentInterval);
+      } else {
+        console.log('Background jobs have been stopped. Not scheduling next run.');
+      }
     }
   }
   
   // Start the auto-fetch job immediately
   runAutoFetchJob();
+  
+  // Set up periodic check for stop flag
+  setInterval(async () => {
+    await checkStopCollectionFlag();
+  }, STOP_COLLECTION_CONFIG.checkInterval);
 }
 
 // Initialize the app
@@ -2927,6 +2991,43 @@ app.get('/api/force-save', asyncHandler(async (req, res) => {
       success: false,
       error: {
         message: 'Failed to force save to Blob storage',
+        details: error.message
+      }
+    });
+  }
+}));
+
+// Add an endpoint to check the status of data collection
+app.get('/api/collection-status', asyncHandler(async (req, res) => {
+  console.log('Checking data collection status...');
+  
+  try {
+    // Check the stop flag
+    const isStopped = await checkStopCollectionFlag();
+    
+    // Return the status
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      collectionStatus: {
+        isRunning: !isStopped && !backgroundJobState.isStopped,
+        isStopped: isStopped || backgroundJobState.isStopped,
+        lastRunTime: backgroundJobState.lastRunTime,
+        nextRunTime: backgroundJobState.lastRunTime && !backgroundJobState.isStopped
+          ? new Date(backgroundJobState.lastRunTime.getTime() + backgroundJobState.currentInterval)
+          : null,
+        consecutiveErrors: backgroundJobState.consecutiveErrors,
+        currentInterval: `${backgroundJobState.currentInterval / 1000} seconds`
+      }
+    });
+  } catch (error) {
+    console.error('Error in /api/collection-status:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to check data collection status',
         details: error.message
       }
     });

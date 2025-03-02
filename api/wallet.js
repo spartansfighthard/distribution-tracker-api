@@ -9,12 +9,33 @@ module.exports = async (req, res) => {
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
 
   // Handle OPTIONS request for CORS preflight
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
+  }
+
+  // API Key Authentication
+  const apiKey = req.headers['x-api-key'] || req.query.api_key;
+  const validApiKey = process.env.API_KEY;
+  
+  // Skip API key validation for the Telegram bot
+  const isTelegramBot = req.headers['user-agent']?.includes('TelegramBot');
+  const isLocalRequest = req.headers['x-forwarded-for'] === '127.0.0.1' || req.connection.remoteAddress === '127.0.0.1';
+  
+  // Only validate API key if it's configured and not from the Telegram bot or local request
+  if (validApiKey && !isTelegramBot && !isLocalRequest) {
+    if (!apiKey || apiKey !== validApiKey) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          message: 'Unauthorized: Invalid or missing API key',
+          code: 401
+        }
+      });
+    }
   }
 
   try {
