@@ -193,11 +193,20 @@ const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL;
 let DISTRIBUTION_WALLET_ADDRESS = process.env.DISTRIBUTION_WALLET_ADDRESS;
 const TAX_TOKEN_MINT_ADDRESS = process.env.TAX_TOKEN_MINT_ADDRESS;
 
-// Track additional wallets
+// Track additional wallets and user wallets
 const trackedWallets = new Set();
+const userWallets = new Map();
+const lastNotifiedTimes = new Map();
 if (DISTRIBUTION_WALLET_ADDRESS) {
   trackedWallets.add(DISTRIBUTION_WALLET_ADDRESS);
 }
+
+// Make functions available globally for the Telegram bot
+global.trackedWallets = trackedWallets;
+global.userWallets = userWallets;
+global.lastNotifiedTimes = lastNotifiedTimes;
+global.getRewardsForWallet = getRewardsForWallet;
+global.storage = storage;
 
 // Log environment variables for debugging (without exposing sensitive values)
 console.log(`
@@ -1108,6 +1117,123 @@ function getStats() {
       },
       transactionsByWallet: {}
     };
+  }
+}
+
+// Get rewards for a specific wallet
+async function getRewardsForWallet(walletAddress) {
+  try {
+    console.log(`Getting rewards for wallet: ${walletAddress}`);
+    
+    // Filter transactions where this wallet is the receiver and the sender is the distribution wallet
+    const receivedTransactions = transactions.filter(tx => 
+      tx.token === 'SOL' && 
+      tx.type === 'sent' && 
+      tx.receiver === walletAddress && 
+      tx.sender === DISTRIBUTION_WALLET_ADDRESS
+    );
+    
+    // Calculate total amount received
+    const totalReceived = receivedTransactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
+    
+    // Sort transactions by blockTime (most recent first)
+    const sortedTransactions = [...receivedTransactions].sort((a, b) => 
+      (b.blockTime || 0) - (a.blockTime || 0)
+    );
+    
+    // Return wallet rewards data
+    return {
+      walletAddress,
+      transactionCount: receivedTransactions.length,
+      totalReceived,
+      recentTransactions: sortedTransactions.slice(0, 10)
+    };
+  } catch (error) {
+    console.error(`Error getting rewards for wallet ${walletAddress}:`, error);
+    return {
+      walletAddress,
+      transactionCount: 0,
+      totalReceived: 0,
+      recentTransactions: []
+    };
+  }
+}
+
+// Check for new rewards and notify users
+async function checkAndNotifyNewRewards() {
+  try {
+    console.log('Checking for new rewards to notify users...');
+    
+    // Skip if no Telegram bot token or if in Vercel environment
+    if (!process.env.TELEGRAM_BOT_TOKEN || process.env.VERCEL) {
+      console.log('Skipping reward notifications: Telegram bot not available or running in Vercel');
+      return;
+    }
+    
+    // Initialize Telegram bot
+    const TelegramBot = require('node-telegram-bot-api');
+    const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
+    
+    // Get user wallets
+    if (!global.userWallets || global.userWallets.size === 0) {
+      console.log('No user wallets registered for notifications');
+      return;
+    }
+    
+    // Check each user wallet for new rewards
+    for (const [chatId, walletAddress] of global.userWallets.entries()) {
+      // Get last notified time for this wallet
+      const lastNotifiedTime = global.lastNotifiedTimes?.get(chatId) || 0;
+      
+      // Get transactions where this wallet is the receiver and the sender is the distribution wallet
+      const newTransactions = transactions.filter(tx => 
+        tx.token === 'SOL' && 
+        tx.type === 'sent' && 
+        tx.receiver === walletAddress && 
+        tx.sender === DISTRIBUTION_WALLET_ADDRESS &&
+        tx.blockTime > lastNotifiedTime
+      );
+      
+      if (newTransactions.length > 0) {
+        // Calculate total new rewards
+        const totalNewRewards = newTransactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
+        
+        // Format notification message
+        let message = `🎉 *New Rewards Received!* 🎉\n\n`;
+        message += `You've received ${totalNewRewards.toFixed(7)} SOL in ${newTransactions.length} transaction(s).\n\n`;
+        
+        if (newTransactions.length <= 5) {
+          // Show details for each transaction if there are 5 or fewer
+          message += `*Transaction Details:*\n`;
+          newTransactions.forEach((tx, i) => {
+            const date = new Date(tx.timestamp).toLocaleString();
+            message += `${i+1}. ${tx.amount.toFixed(7)} SOL on ${date}\n`;
+          });
+        } else {
+          // Just show the most recent transaction if there are more than 5
+          const mostRecent = newTransactions.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0))[0];
+          const date = new Date(mostRecent.timestamp).toLocaleString();
+          message += `Most recent: ${mostRecent.amount.toFixed(7)} SOL on ${date}\n`;
+          message += `Use /myrewards to see all transactions.`;
+        }
+        
+        // Send notification
+        try {
+          await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+          console.log(`Sent reward notification to chat ${chatId} for wallet ${walletAddress}`);
+          
+          // Update last notified time
+          if (!global.lastNotifiedTimes) {
+            global.lastNotifiedTimes = new Map();
+          }
+          global.lastNotifiedTimes.set(chatId, Date.now());
+        } catch (error) {
+          console.error(`Error sending notification to chat ${chatId}:`, error);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error checking for new rewards:', error);
   }
 }
 
@@ -2664,6 +2790,12 @@ function startBackgroundJobs() {
       const newTransactions = await fetchAllHistoricalTransactions();
       
       console.log(`Auto-fetch job completed: fetched ${newTransactions.length} new transactions`);
+      
+      // Check for new rewards and notify users
+      if (newTransactions.length > 0) {
+        console.log('Checking for new rewards to notify users...');
+        await checkAndNotifyNewRewards();
+      }
       
       // Reset consecutive errors on success
       backgroundJobState.consecutiveErrors = 0;
