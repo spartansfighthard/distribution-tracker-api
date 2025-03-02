@@ -190,8 +190,14 @@ const backgroundJobState = {
 // Constants
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL;
-const DISTRIBUTION_WALLET_ADDRESS = process.env.DISTRIBUTION_WALLET_ADDRESS;
+let DISTRIBUTION_WALLET_ADDRESS = process.env.DISTRIBUTION_WALLET_ADDRESS;
 const TAX_TOKEN_MINT_ADDRESS = process.env.TAX_TOKEN_MINT_ADDRESS;
+
+// Track additional wallets
+const trackedWallets = new Set();
+if (DISTRIBUTION_WALLET_ADDRESS) {
+  trackedWallets.add(DISTRIBUTION_WALLET_ADDRESS);
+}
 
 // Log environment variables for debugging (without exposing sensitive values)
 console.log(`
@@ -1051,7 +1057,13 @@ function getStats() {
       totalTransactions: transactions.length,
       transactionsByType: {},
       transactionsByToken: {},
-      totalAmountByToken: {}
+      totalAmountByToken: {},
+      trackedWallets: {
+        count: trackedWallets.size,
+        addresses: Array.from(trackedWallets),
+        mainWallet: DISTRIBUTION_WALLET_ADDRESS
+      },
+      transactionsByWallet: {}
     };
     
     // Process each transaction
@@ -1066,6 +1078,19 @@ function getStats() {
       if (tx.amount) {
         stats.totalAmountByToken[tx.token] = (stats.totalAmountByToken[tx.token] || 0) + tx.amount;
       }
+      
+      // Count transactions by wallet (sender or receiver)
+      if (tx.sender) {
+        stats.transactionsByWallet[tx.sender] = stats.transactionsByWallet[tx.sender] || { sent: 0, received: 0, total: 0 };
+        stats.transactionsByWallet[tx.sender].sent++;
+        stats.transactionsByWallet[tx.sender].total++;
+      }
+      
+      if (tx.receiver) {
+        stats.transactionsByWallet[tx.receiver] = stats.transactionsByWallet[tx.receiver] || { sent: 0, received: 0, total: 0 };
+        stats.transactionsByWallet[tx.receiver].received++;
+        stats.transactionsByWallet[tx.receiver].total++;
+      }
     }
     
     return stats;
@@ -1075,7 +1100,13 @@ function getStats() {
       totalTransactions: 0,
       transactionsByType: {},
       transactionsByToken: {},
-      totalAmountByToken: {}
+      totalAmountByToken: {},
+      trackedWallets: {
+        count: trackedWallets.size,
+        addresses: Array.from(trackedWallets),
+        mainWallet: DISTRIBUTION_WALLET_ADDRESS
+      },
+      transactionsByWallet: {}
     };
   }
 }
@@ -1106,22 +1137,7 @@ const asyncHandler = fn => async (req, res, next) => {
 
 // Root route handler
 app.get('/', (req, res) => {
-  res.json({
-    name: 'Distribution Tracker API',
-    version: '1.0.0',
-    endpoints: [
-      '/api/stats',
-      '/api/distributed',
-      '/api/sol',
-      '/api/refresh',
-      '/api/fetch-all',
-      '/api/fetch-status',
-      '/api/force-save',
-      '/api/force-refresh',
-      '/api/help'
-    ],
-    message: 'Use /api/help for more information about the endpoints'
-  });
+  res.redirect('/track-wallet');
 });
 
 // Health check endpoint
@@ -1286,6 +1302,25 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
       lastFetch: lastFetchTimestamp,
       environment: process.env.NODE_ENV || 'development',
       vercel: false,
+      cacheStatus: {
+        transactionCount: transactions.length,
+        note: "Using cached data when available"
+      },
+      stats
+    });
+    
+    // Return statistics with tracked wallet info prominently displayed
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      lastFetch: lastFetchTimestamp,
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      trackedWallets: {
+        count: trackedWallets.size,
+        addresses: Array.from(trackedWallets),
+        mainWallet: DISTRIBUTION_WALLET_ADDRESS
+      },
       cacheStatus: {
         transactionCount: transactions.length,
         note: "Using cached data when available"
@@ -1999,8 +2034,14 @@ async function fetchAllHistoricalTransactions() {
   try {
     console.log('[Vercel] Starting historical transaction fetch...');
     
-    if (!HELIUS_API_KEY || !HELIUS_RPC_URL || !DISTRIBUTION_WALLET_ADDRESS) {
+    if (!HELIUS_API_KEY || !HELIUS_RPC_URL) {
       console.error('Missing required environment variables for Helius service');
+      return [];
+    }
+    
+    // Check if we have any wallets to track
+    if (trackedWallets.size === 0) {
+      console.log('No wallets to track. Please add a wallet first.');
       return [];
     }
     
@@ -2790,45 +2831,13 @@ app.get('/api/*', (req, res) => {
       '/api/fetch-status',
       '/api/force-save',
       '/api/force-refresh',
-      '/'
-    ]
-  });
-});
-
-// Add a catch-all route for API endpoints
-app.get('/api/*', (req, res) => {
-  res.status(404).json({
-    error: 'Endpoint not found',
-    availableEndpoints: [
-      '/api/stats',
-      '/api/distributed',
-      '/api/sol',
-      '/api/refresh',
-      '/api/fetch-all',
-      '/api/fetch-status',
-      '/api/force-save',
-      '/api/force-refresh',
-      '/api/background-job/:action',
-      '/'
-    ]
-  });
-});
-
-// Add a catch-all route for API endpoints
-app.get('/api/*', (req, res) => {
-  res.status(404).json({
-    error: 'Endpoint not found',
-    availableEndpoints: [
-      '/api/stats',
-      '/api/distributed',
-      '/api/sol',
-      '/api/refresh',
-      '/api/fetch-all',
-      '/api/fetch-status',
-      '/api/force-save',
-      '/api/force-refresh',
       '/api/background-job/:action',
       '/api/test-fetch',
+      '/api/test-all',
+      '/api/wallet/track',
+      '/api/wallet/tracked',
+      '/api/wallet/track/:address',
+      '/track-wallet',
       '/'
     ]
   });
@@ -2881,3 +2890,522 @@ app.get('/api/test-fetch', asyncHandler(async (req, res) => {
     });
   }
 }));
+
+// Add endpoints for wallet tracking
+app.post('/api/wallet/track', express.json(), asyncHandler(async (req, res) => {
+  try {
+    const { walletAddress } = req.body;
+    
+    if (!walletAddress) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: 'Wallet address is required'
+        }
+      });
+    }
+    
+    // Validate wallet address (basic check for Solana address)
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(walletAddress)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: 'Invalid Solana wallet address format'
+        }
+      });
+    }
+    
+    // Add to tracked wallets
+    trackedWallets.add(walletAddress);
+    
+    // If this is the first wallet, set it as the main distribution wallet
+    if (!DISTRIBUTION_WALLET_ADDRESS) {
+      DISTRIBUTION_WALLET_ADDRESS = walletAddress;
+      console.log(`Set main distribution wallet to: ${walletAddress}`);
+    }
+    
+    console.log(`Added wallet to tracking: ${walletAddress}`);
+    console.log(`Currently tracking ${trackedWallets.size} wallets`);
+    
+    // Start fetching transactions for this wallet
+    setTimeout(() => {
+      fetchTransactionsForWallet(walletAddress).catch(err => 
+        console.error(`Error fetching initial transactions for wallet ${walletAddress}:`, err)
+      );
+    }, 100);
+    
+    res.json({
+      success: true,
+      message: 'Wallet added to tracking',
+      walletAddress,
+      isMainWallet: walletAddress === DISTRIBUTION_WALLET_ADDRESS,
+      trackedWalletCount: trackedWallets.size,
+      trackedWallets: Array.from(trackedWallets)
+    });
+  } catch (error) {
+    console.error('Error adding wallet for tracking:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to add wallet for tracking',
+        details: error.message
+      }
+    });
+  }
+}));
+
+app.delete('/api/wallet/track/:address', asyncHandler(async (req, res) => {
+  try {
+    const { address } = req.params;
+    
+    if (!address) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          message: 'Wallet address is required'
+        }
+      });
+    }
+    
+    // Remove from tracked wallets
+    const wasTracked = trackedWallets.has(address);
+    trackedWallets.delete(address);
+    
+    // If this was the main distribution wallet, set a new one if available
+    if (address === DISTRIBUTION_WALLET_ADDRESS) {
+      const remainingWallets = Array.from(trackedWallets);
+      if (remainingWallets.length > 0) {
+        DISTRIBUTION_WALLET_ADDRESS = remainingWallets[0];
+        console.log(`Set new main distribution wallet to: ${DISTRIBUTION_WALLET_ADDRESS}`);
+      } else {
+        DISTRIBUTION_WALLET_ADDRESS = null;
+        console.log('No main distribution wallet set');
+      }
+    }
+    
+    console.log(`Removed wallet from tracking: ${address}`);
+    console.log(`Currently tracking ${trackedWallets.size} wallets`);
+    
+    res.json({
+      success: true,
+      message: wasTracked ? 'Wallet removed from tracking' : 'Wallet was not being tracked',
+      walletAddress: address,
+      currentMainWallet: DISTRIBUTION_WALLET_ADDRESS,
+      trackedWalletCount: trackedWallets.size,
+      trackedWallets: Array.from(trackedWallets)
+    });
+  } catch (error) {
+    console.error('Error removing wallet from tracking:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to remove wallet from tracking',
+        details: error.message
+      }
+    });
+  }
+}));
+
+app.get('/api/wallet/tracked', asyncHandler(async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      mainWallet: DISTRIBUTION_WALLET_ADDRESS,
+      trackedWalletCount: trackedWallets.size,
+      trackedWallets: Array.from(trackedWallets)
+    });
+  } catch (error) {
+    console.error('Error getting tracked wallets:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to get tracked wallets',
+        details: error.message
+      }
+    });
+  }
+}));
+
+// Add a comprehensive test endpoint
+app.get('/api/test-all', asyncHandler(async (req, res) => {
+  console.log('Running comprehensive system test...');
+  
+  try {
+    const testResults = {
+      timestamp: new Date().toISOString(),
+      tests: {}
+    };
+    
+    // Test 1: Configuration
+    testResults.tests.configuration = {
+      heliusApiKey: !!HELIUS_API_KEY,
+      heliusRpcUrl: !!HELIUS_RPC_URL,
+      distributionWalletAddress: !!DISTRIBUTION_WALLET_ADDRESS,
+      taxTokenMintAddress: !!TAX_TOKEN_MINT_ADDRESS,
+      trackedWalletCount: trackedWallets.size,
+      maxStoredTransactions: STORAGE_CONFIG.maxStoredTransactions,
+      maxTransactionsToFetch: CONFIG.transactions.maxTransactionsToFetch,
+      backgroundJobsEnabled: CONFIG.backgroundJobs.enabled,
+      autoFetchInterval: CONFIG.backgroundJobs.autoFetchInterval
+    };
+    
+    // Test 2: Storage
+    const initialTransactionCount = transactions.length;
+    testResults.tests.storage = {
+      initialTransactionCount,
+      inMemoryStorageWorking: Array.isArray(transactions)
+    };
+    
+    // Test 3: Transaction fetching
+    console.log('Testing transaction fetching...');
+    const fetchStartTime = Date.now();
+    const fetchedTransactions = await fetchTransactionsVercel(5); // Fetch just 5 for testing
+    const fetchDuration = Date.now() - fetchStartTime;
+    
+    testResults.tests.transactionFetching = {
+      fetchedCount: fetchedTransactions.length,
+      fetchDurationMs: fetchDuration,
+      fetchSuccessful: fetchedTransactions.length > 0,
+      fetchLimitWorking: fetchedTransactions.length <= 5,
+      sampleTransaction: fetchedTransactions.length > 0 ? {
+        signature: fetchedTransactions[0].signature,
+        blockTime: fetchedTransactions[0].blockTime,
+        type: fetchedTransactions[0].type
+      } : null
+    };
+    
+    // Test 4: Background job status
+    testResults.tests.backgroundJobs = {
+      enabled: CONFIG.backgroundJobs.enabled,
+      isRunning: backgroundJobState.isRunning,
+      lastRunTime: backgroundJobState.lastRunTime,
+      consecutiveErrors: backgroundJobState.consecutiveErrors,
+      currentInterval: backgroundJobState.currentInterval
+    };
+    
+    // Test 5: Refresh functionality
+    console.log('Testing refresh functionality...');
+    const preRefreshCount = transactions.length;
+    
+    // Clear transactions
+    transactions.length = 0;
+    
+    // Fetch a small batch
+    const refreshedTransactions = await fetchTransactionsVercel(3);
+    const postRefreshCount = transactions.length;
+    
+    testResults.tests.refreshFunctionality = {
+      preRefreshCount,
+      postRefreshCount,
+      clearingWorked: preRefreshCount > 0 && postRefreshCount < preRefreshCount,
+      fetchAfterClearWorked: postRefreshCount > 0
+    };
+    
+    // Restore original transactions if needed
+    if (preRefreshCount > 0 && postRefreshCount < preRefreshCount) {
+      console.log('Restoring original transaction count...');
+      await fetchTransactionsVercel(10);
+    }
+    
+    // Return all test results
+    res.json({
+      success: true,
+      message: 'Comprehensive system test completed',
+      testResults
+    });
+  } catch (error) {
+    console.error('Error in comprehensive test:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Comprehensive test failed',
+        details: error.message
+      }
+    });
+  }
+}));
+
+// Add a function to fetch transactions for a specific wallet
+async function fetchTransactionsForWallet(walletAddress, limit = 10) {
+  try {
+    console.log(`Fetching transactions for wallet: ${walletAddress} (limit: ${limit})...`);
+    
+    if (!HELIUS_API_KEY || !HELIUS_RPC_URL) {
+      console.error('Missing required environment variables for Helius service');
+      return [];
+    }
+    
+    // Prepare request data
+    const requestData = {
+      jsonrpc: '2.0',
+      id: 'my-id',
+      method: 'getSignaturesForAddress',
+      params: [
+        walletAddress,
+        {
+          limit: limit,
+          before: null, // Fetch from the most recent
+          until: null   // No end point
+        }
+      ]
+    };
+    
+    // Add retry logic for rate limiting
+    let retryCount = 0;
+    let success = false;
+    let response;
+    
+    while (!success && retryCount < 5) {
+      try {
+        // Make direct request to Helius API with proper headers
+        response = await axios.post(HELIUS_RPC_URL, requestData, {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': HELIUS_API_KEY
+          },
+          timeout: 10000 // 10 second timeout
+        });
+        
+        success = true;
+      } catch (error) {
+        retryCount++;
+        console.error(`Error fetching transactions for wallet (attempt ${retryCount}/5):`, error.message);
+        
+        if (retryCount < 5) {
+          // Exponential backoff
+          const backoffTime = Math.pow(2, retryCount) * 1000;
+          console.log(`Retrying in ${backoffTime / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, backoffTime));
+        } else {
+          console.error('Max retries reached, giving up');
+          return [];
+        }
+      }
+    }
+    
+    // Check if response is valid
+    if (!response || !response.data || !response.data.result) {
+      console.error('Invalid response from Helius API:', response?.data);
+      return [];
+    }
+    
+    // Get signatures from response
+    const signatures = response.data.result;
+    console.log(`Got ${signatures.length} signatures for wallet ${walletAddress}`);
+    
+    // Process each signature to get transaction details
+    const newTransactions = [];
+    
+    for (const item of signatures) {
+      try {
+        // Check if we already have this transaction
+        const existingTransaction = transactions.find(t => t.signature === item.signature);
+        if (existingTransaction) {
+          console.log(`Transaction ${item.signature} already exists, skipping`);
+          continue;
+        }
+        
+        // Get transaction details
+        const txData = await getTransactionDetails(item.signature);
+        
+        if (txData) {
+          newTransactions.push(txData);
+        }
+      } catch (error) {
+        console.error(`Error processing transaction ${item.signature}:`, error.message);
+      }
+    }
+    
+    console.log(`Processed ${newTransactions.length} new transactions for wallet ${walletAddress}`);
+    return newTransactions;
+  } catch (error) {
+    console.error(`Error fetching transactions for wallet ${walletAddress}:`, error);
+    return [];
+  }
+}
+
+// Add a simple HTML form for users to enter their wallet
+app.get('/track-wallet', (req, res) => {
+  const html = `
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Track Your Wallet</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        color: #333;
+      }
+      h1 {
+        color: #2c3e50;
+        margin-bottom: 20px;
+      }
+      .container {
+        background-color: #f9f9f9;
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      }
+      .form-group {
+        margin-bottom: 15px;
+      }
+      label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 16px;
+      }
+      button {
+        background-color: #3498db;
+        color: white;
+        border: none;
+        padding: 10px 15px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 16px;
+      }
+      button:hover {
+        background-color: #2980b9;
+      }
+      .result {
+        margin-top: 20px;
+        padding: 15px;
+        border-radius: 4px;
+        display: none;
+      }
+      .success {
+        background-color: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+      }
+      .error {
+        background-color: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+      }
+      .current-wallet {
+        margin-top: 20px;
+        padding: 15px;
+        background-color: #e8f4fd;
+        border-radius: 4px;
+        border: 1px solid #b8daff;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Track Your Solana Wallet</h1>
+      <p>Enter your Solana wallet address below to start tracking your rewards and transactions.</p>
+      
+      <div class="form-group">
+        <label for="walletAddress">Solana Wallet Address:</label>
+        <input type="text" id="walletAddress" name="walletAddress" placeholder="Enter your Solana wallet address" required>
+      </div>
+      
+      <button id="trackButton">Start Tracking</button>
+      
+      <div id="result" class="result"></div>
+      
+      <div id="currentWallet" class="current-wallet" style="display: none;">
+        <h3>Currently Tracking:</h3>
+        <p id="currentWalletAddress"></p>
+        <button id="stopTrackingButton">Stop Tracking</button>
+      </div>
+    </div>
+    
+    <script>
+      document.addEventListener('DOMContentLoaded', function() {
+        // Check if we're already tracking a wallet
+        fetch('/api/wallet/tracked')
+          .then(response => response.json())
+          .then(data => {
+            if (data.success && data.trackedWalletCount > 0) {
+              document.getElementById('currentWallet').style.display = 'block';
+              document.getElementById('currentWalletAddress').textContent = data.trackedWallets.join(', ');
+            }
+          })
+          .catch(error => console.error('Error checking tracked wallets:', error));
+        
+        // Handle form submission
+        document.getElementById('trackButton').addEventListener('click', function() {
+          const walletAddress = document.getElementById('walletAddress').value.trim();
+          
+          if (!walletAddress) {
+            showResult('Please enter a wallet address', 'error');
+            return;
+          }
+          
+          fetch('/api/wallet/track', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ walletAddress })
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              showResult('Wallet added successfully! We are now tracking your transactions.', 'success');
+              document.getElementById('currentWallet').style.display = 'block';
+              document.getElementById('currentWalletAddress').textContent = data.trackedWallets.join(', ');
+            } else {
+              showResult('Error: ' + (data.error?.message || 'Unknown error'), 'error');
+            }
+          })
+          .catch(error => {
+            showResult('Error: ' + error.message, 'error');
+          });
+        });
+        
+        // Handle stop tracking
+        document.getElementById('stopTrackingButton').addEventListener('click', function() {
+          const walletAddress = document.getElementById('currentWalletAddress').textContent.trim();
+          
+          fetch('/api/wallet/track/' + walletAddress, {
+            method: 'DELETE'
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              showResult('Wallet removed from tracking.', 'success');
+              document.getElementById('currentWallet').style.display = 'none';
+            } else {
+              showResult('Error: ' + (data.error?.message || 'Unknown error'), 'error');
+            }
+          })
+          .catch(error => {
+            showResult('Error: ' + error.message, 'error');
+          });
+        });
+        
+        function showResult(message, type) {
+          const resultElement = document.getElementById('result');
+          resultElement.textContent = message;
+          resultElement.className = 'result ' + type;
+          resultElement.style.display = 'block';
+        }
+      });
+    </script>
+  </body>
+  </html>
+  `;
+  
+  res.send(html);
+});
+
+// Add a root route that redirects to the wallet tracking page
+app.get('/', (req, res) => {
+  res.redirect('/track-wallet');
+});
