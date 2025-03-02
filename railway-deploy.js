@@ -379,8 +379,12 @@ if (!token) {
           return bot.sendMessage(chatId, '⛔ Sorry, this command is only available to admins.');
         }
         
-        bot.sendMessage(chatId, "🛑 *Bot Shutdown Initiated*\n\nThe bot is shutting down. It will be restarted automatically by the deployment platform.", { parse_mode: 'Markdown' });
-        console.log(`Bot shutdown initiated by admin (User ID: ${userId})`);
+        // Determine if we're running on Vercel or Railway
+        const isVercel = API_BASE_URL.includes('vercel.app');
+        const platformName = isVercel ? "Vercel" : "Railway";
+        
+        bot.sendMessage(chatId, `🛑 *Bot Shutdown Initiated*\n\nThe bot is shutting down. It will be restarted automatically by the ${platformName} deployment platform.`, { parse_mode: 'Markdown' });
+        console.log(`Bot shutdown initiated by admin (User ID: ${userId}) on ${platformName} platform`);
         
         // Exit the process after a short delay
         setTimeout(() => {
