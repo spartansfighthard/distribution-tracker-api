@@ -1991,27 +1991,19 @@ async function fetchAllHistoricalTransactions() {
     const existingSignatures = new Set(transactions.map(tx => tx.signature));
     console.log(`[Vercel] Loaded ${existingSignatures.size} existing transaction signatures`);
     
-    // Check if we've recently fetched transactions to avoid unnecessary processing
-    const now = Date.now();
-    const lastFetchTime = lastFetchTimestamp ? new Date(lastFetchTimestamp).getTime() : 0;
-    const timeSinceLastFetch = now - lastFetchTime;
-    
-    // If we've fetched within the last 5 minutes and have more than 100 transactions, skip
-    if (timeSinceLastFetch < 5 * 60 * 1000 && transactions.length > 100) {
-      console.log(`[Vercel] Last fetch was ${Math.round(timeSinceLastFetch / 1000)} seconds ago with ${transactions.length} transactions. Skipping to avoid unnecessary processing.`);
-      return [];
-    }
+    // Remove the time-based check to ensure we always fetch new transactions
+    // regardless of when we last fetched
     
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
     const batchSize = 50; // Fetch 50 signatures at a time
     let batchCount = 0;
-    const maxBatches = 2; // Process up to 2 batches per run to avoid timeouts
+    const maxBatches = 5; // Increased from 2 to 5 to fetch more transactions per run
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 8000; // 8 seconds time limit to be conservative
+    const timeLimit = 12000; // Increased from 8 to 12 seconds to allow more time for fetching
     
     while (hasMore && batchCount < maxBatches) {
       // Check if we're approaching the time limit
@@ -2320,6 +2312,68 @@ app.get('/api/fetch-all', asyncHandler(async (req, res) => {
   }
 }));
 
+// Add a new endpoint to trigger historical fetch
+app.get('/api/fetch-all', asyncHandler(async (req, res) => {
+  console.log('Starting continuous transaction fetch...');
+  
+  try {
+    // Start the historical fetch
+    const newTransactions = await fetchAllHistoricalTransactions();
+    
+    // Return response
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      message: 'Continuous transaction fetch completed',
+      newTransactionsCount: newTransactions.length,
+      totalTransactionsCount: transactions.length,
+      note: 'This endpoint will always attempt to fetch new transactions regardless of when it was last called. Call it repeatedly to continuously collect all transactions.'
+    });
+  } catch (error) {
+    console.error('Error in /api/fetch-all:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to fetch all historical transactions',
+        details: error.message
+      }
+    });
+  }
+}));
+
+// Add a new endpoint to trigger continuous transaction fetch
+app.get('/api/fetch-all', asyncHandler(async (req, res) => {
+  console.log('Starting continuous transaction fetch...');
+  
+  try {
+    // Start the historical fetch
+    const newTransactions = await fetchAllHistoricalTransactions();
+    
+    // Return response
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      vercel: process.env.VERCEL ? true : false,
+      message: 'Continuous transaction fetch completed',
+      newTransactionsCount: newTransactions.length,
+      totalTransactionsCount: transactions.length,
+      note: 'This endpoint will always attempt to fetch new transactions regardless of when it was last called. Call it repeatedly to continuously collect all transactions.'
+    });
+  } catch (error) {
+    console.error('Error in /api/fetch-all:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Failed to fetch all historical transactions',
+        details: error.message
+      }
+    });
+  }
+}));
+
 // Add a new endpoint to check transaction fetch status
 app.get('/api/fetch-status', asyncHandler(async (req, res) => {
   console.log('Checking transaction fetch status...');
@@ -2475,11 +2529,11 @@ app.get('/api/force-refresh', asyncHandler(async (req, res) => {
       await storage.save();
       STORAGE_CONFIG.storageInterval = originalInterval;
       
-      // Trigger historical fetch to get more data
-      console.log('Triggering historical transaction fetch after force refresh...');
-      fetchAllHistoricalTransactions().catch(err => 
-        console.error('Error fetching historical transactions after force refresh:', err)
-      );
+      // No longer trigger historical fetch automatically
+      // console.log('Triggering historical transaction fetch after force refresh...');
+      // fetchAllHistoricalTransactions().catch(err => 
+      //   console.error('Error fetching historical transactions after force refresh:', err)
+      // );
     }
     
     // Return response
@@ -2488,10 +2542,10 @@ app.get('/api/force-refresh', asyncHandler(async (req, res) => {
       timestamp: new Date().toISOString(),
       environment: process.env.NODE_ENV || 'development',
       vercel: process.env.VERCEL ? true : false,
-      message: 'Forced full refresh of all transactions',
+      message: 'Forced full refresh of all transactions (without historical fetch)',
       transactionCount: transactions.length,
       fetchedTransactions: fetchedTransactions.length,
-      note: 'Historical transaction fetch has been triggered to get more data in the background.'
+      note: 'Only the most recent transactions have been fetched. Use /api/fetch-all to get historical transactions.'
     });
   } catch (error) {
     console.error('Error in /api/force-refresh:', error);
