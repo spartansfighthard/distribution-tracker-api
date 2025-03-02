@@ -1380,7 +1380,7 @@ const asyncHandler = fn => async (req, res, next) => {
 app.get('/', (req, res) => {
   res.json({
     name: "Distribution Tracker API",
-    version: "1.0.0",
+    version: "1.1.0", // Updated version number
     endpoints: [
       "/api/stats",
       "/api/distributed",
@@ -1391,6 +1391,10 @@ app.get('/', (req, res) => {
       "/api/force-save",
       "/api/force-refresh",
       "/api/help"
+    ],
+    adminEndpoints: [
+      "/api/admin/stop-collection",
+      "/api/admin/stop-api"
     ],
     message: "Use /api/help for more information about the endpoints"
   });
