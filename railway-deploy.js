@@ -388,6 +388,33 @@ if (!token) {
         }, 1000);
       });
 
+      // Stop API data collection command (admin only)
+      bot.onText(/\/stop_api/, (msg) => {
+        const chatId = msg.chat.id;
+        
+        requireAdmin(msg, async () => {
+          const statusMessage = await bot.sendMessage(chatId, "⏳ Stopping API data collection...");
+          
+          try {
+            const response = await fetchFromAPI('/api/admin/stop-collection');
+            
+            if (response.success) {
+              await bot.sendMessage(chatId, "✅ *API Data Collection Stopped*\n\n" + (response.message || "Data collection has been stopped successfully."), {
+                parse_mode: 'Markdown'
+              });
+            } else {
+              throw new Error(response.error?.message || 'Unknown error');
+            }
+          } catch (error) {
+            console.error('Error stopping API data collection:', error.message);
+            
+            await bot.sendMessage(chatId, "❌ *Error Stopping Data Collection*\n\n" + error.message, {
+              parse_mode: 'Markdown'
+            });
+          }
+        });
+      });
+
       // Force refresh command (admin only)
       bot.onText(/\/force_refresh/, (msg) => {
         const chatId = msg.chat.id;
@@ -440,7 +467,6 @@ if (!token) {
             });
           }
         });
-      });
 
       // Fetch all command (admin only)
       bot.onText(/\/fetch_all/, (msg) => {
