@@ -38,6 +38,14 @@ const CONFIG = {
     cacheExpiration: 30 * 60 * 1000, // Cache expiration time in ms (30 minutes)
     maxTransactionsPerRequest: 2, // Reduced from 5 to 2 to avoid timeouts
   },
+  // Background jobs
+  backgroundJobs: {
+    enabled: true,               // Enable background jobs
+    autoFetchInterval: 5 * 60 * 1000, // Auto-fetch transactions every 5 minutes
+    maxConsecutiveErrors: 3,     // Max consecutive errors before backing off
+    errorBackoffMultiplier: 2,   // Multiply interval by this factor after errors
+    maxBackoffInterval: 30 * 60 * 1000, // Maximum backoff interval (30 minutes)
+  },
   // Vercel optimization
   vercel: {
     maxProcessingTime: 4000,     // Reduced from 5s to 4s to be even more conservative
@@ -169,6 +177,15 @@ const app = express();
 // For Vercel, we'll need to fetch fresh data on each request
 const transactions = [];
 let lastFetchTimestamp = null;
+
+// Background job state
+const backgroundJobState = {
+  isRunning: false,
+  lastRunTime: null,
+  consecutiveErrors: 0,
+  currentInterval: CONFIG.backgroundJobs.autoFetchInterval,
+  timerId: null
+};
 
 // Constants
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
@@ -2392,7 +2409,19 @@ app.get('/api/fetch-status', asyncHandler(async (req, res) => {
       ? transactions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]
       : null;
     
-    // Return status
+    // Get background job status
+    const backgroundJobStatus = {
+      enabled: CONFIG.backgroundJobs.enabled,
+      isRunning: backgroundJobState.isRunning,
+      lastRunTime: backgroundJobState.lastRunTime,
+      nextRunTime: backgroundJobState.lastRunTime 
+        ? new Date(backgroundJobState.lastRunTime.getTime() + backgroundJobState.currentInterval)
+        : null,
+      currentInterval: `${backgroundJobState.currentInterval / 1000} seconds`,
+      consecutiveErrors: backgroundJobState.consecutiveErrors
+    };
+    
+    // Return response
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
@@ -2403,16 +2432,15 @@ app.get('/api/fetch-status', asyncHandler(async (req, res) => {
         solTransactions: solTransactions.length,
         sentTransactions: sentTransactions.length,
         receivedTransactions: receivedTransactions.length,
+        mostRecentTransaction: mostRecentTransaction ? {
+          signature: mostRecentTransaction.signature,
+          timestamp: mostRecentTransaction.timestamp,
+          type: mostRecentTransaction.type,
+          amount: mostRecentTransaction.amount
+        } : null,
         lastFetchTimestamp: lastFetchTimestamp,
-        mostRecentTransactionTimestamp: mostRecentTransaction ? mostRecentTransaction.timestamp : null,
-        mostRecentTransactionSignature: mostRecentTransaction ? mostRecentTransaction.signature : null,
-        storageConfig: {
-          vercelKVEnabled: STORAGE_CONFIG.vercelKVEnabled,
-          vercelBlobEnabled: STORAGE_CONFIG.vercelBlobEnabled,
-          maxStoredTransactions: STORAGE_CONFIG.maxStoredTransactions
-        }
-      },
-      message: 'Transaction fetch status retrieved successfully'
+        backgroundJob: backgroundJobStatus
+      }
     });
   } catch (error) {
     console.error('Error in /api/fetch-status:', error);
@@ -2420,6 +2448,108 @@ app.get('/api/fetch-status', asyncHandler(async (req, res) => {
       success: false,
       error: {
         message: 'Failed to get transaction fetch status',
+        details: error.message
+      }
+    });
+  }
+}));
+
+// Add a new endpoint to control background jobs
+app.get('/api/background-job/:action', asyncHandler(async (req, res) => {
+  const action = req.params.action;
+  console.log(`Background job control: ${action}`);
+  
+  try {
+    let message = '';
+    let success = true;
+    
+    switch (action) {
+      case 'start':
+        if (!CONFIG.backgroundJobs.enabled) {
+          CONFIG.backgroundJobs.enabled = true;
+          startBackgroundJobs();
+          message = 'Background jobs started successfully';
+        } else if (backgroundJobState.timerId) {
+          message = 'Background jobs are already running';
+        } else {
+          startBackgroundJobs();
+          message = 'Background jobs restarted successfully';
+        }
+        break;
+        
+      case 'stop':
+        if (backgroundJobState.timerId) {
+          clearTimeout(backgroundJobState.timerId);
+          backgroundJobState.timerId = null;
+          backgroundJobState.isRunning = false;
+          CONFIG.backgroundJobs.enabled = false;
+          message = 'Background jobs stopped successfully';
+        } else {
+          message = 'Background jobs are not running';
+        }
+        break;
+        
+      case 'run-now':
+        // Trigger a fetch job immediately
+        fetchAllHistoricalTransactions()
+          .then(newTransactions => {
+            console.log(`Manual job run completed: fetched ${newTransactions.length} new transactions`);
+          })
+          .catch(err => {
+            console.error('Error in manual job run:', err);
+          });
+        
+        message = 'Manual job run triggered';
+        break;
+        
+      case 'reset':
+        // Reset the background job state
+        if (backgroundJobState.timerId) {
+          clearTimeout(backgroundJobState.timerId);
+        }
+        
+        backgroundJobState.isRunning = false;
+        backgroundJobState.lastRunTime = null;
+        backgroundJobState.consecutiveErrors = 0;
+        backgroundJobState.currentInterval = CONFIG.backgroundJobs.autoFetchInterval;
+        backgroundJobState.timerId = null;
+        
+        // Restart if enabled
+        if (CONFIG.backgroundJobs.enabled) {
+          startBackgroundJobs();
+        }
+        
+        message = 'Background job state reset successfully';
+        break;
+        
+      default:
+        success = false;
+        message = `Unknown action: ${action}. Valid actions are: start, stop, run-now, reset`;
+    }
+    
+    // Return response
+    res.json({
+      success,
+      timestamp: new Date().toISOString(),
+      action,
+      message,
+      backgroundJobStatus: {
+        enabled: CONFIG.backgroundJobs.enabled,
+        isRunning: backgroundJobState.isRunning,
+        lastRunTime: backgroundJobState.lastRunTime,
+        nextRunTime: backgroundJobState.lastRunTime 
+          ? new Date(backgroundJobState.lastRunTime.getTime() + backgroundJobState.currentInterval)
+          : null,
+        currentInterval: `${backgroundJobState.currentInterval / 1000} seconds`,
+        consecutiveErrors: backgroundJobState.consecutiveErrors
+      }
+    });
+  } catch (error) {
+    console.error(`Error in /api/background-job/${action}:`, error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: `Failed to ${action} background job`,
         details: error.message
       }
     });
@@ -2451,18 +2581,82 @@ app.use((err, req, res, next) => {
   });
 });
 
-// For local development
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, async () => {
-    console.log(`Server running on port ${PORT}`);
+// Initialize the app
+async function initializeApp() {
+  try {
     // Initialize storage
     await storage.init();
-  });
-} else {
-  // For production, initialize storage when the module is loaded
-  storage.init().catch(err => console.error('Error initializing storage:', err));
+    
+    // Start background jobs if enabled
+    if (CONFIG.backgroundJobs.enabled) {
+      startBackgroundJobs();
+    }
+    
+    // Start the server
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Error initializing app:', error);
+  }
 }
+
+// Function to start background jobs
+function startBackgroundJobs() {
+  console.log('Starting background jobs for continuous data collection...');
+  
+  // Function to run the auto-fetch job
+  async function runAutoFetchJob() {
+    if (backgroundJobState.isRunning) {
+      console.log('Auto-fetch job already running, skipping this run');
+      return;
+    }
+    
+    backgroundJobState.isRunning = true;
+    
+    try {
+      console.log(`Running auto-fetch job at ${new Date().toISOString()}`);
+      
+      // Fetch historical transactions
+      const newTransactions = await fetchAllHistoricalTransactions();
+      
+      console.log(`Auto-fetch job completed: fetched ${newTransactions.length} new transactions`);
+      
+      // Reset consecutive errors on success
+      backgroundJobState.consecutiveErrors = 0;
+      backgroundJobState.currentInterval = CONFIG.backgroundJobs.autoFetchInterval;
+      
+    } catch (error) {
+      console.error('Error in auto-fetch job:', error);
+      
+      // Increase consecutive errors and apply backoff
+      backgroundJobState.consecutiveErrors++;
+      
+      if (backgroundJobState.consecutiveErrors > CONFIG.backgroundJobs.maxConsecutiveErrors) {
+        // Apply backoff to the interval
+        backgroundJobState.currentInterval = Math.min(
+          backgroundJobState.currentInterval * CONFIG.backgroundJobs.errorBackoffMultiplier,
+          CONFIG.backgroundJobs.maxBackoffInterval
+        );
+        
+        console.log(`Backing off auto-fetch job due to errors. New interval: ${backgroundJobState.currentInterval / 1000} seconds`);
+      }
+    } finally {
+      backgroundJobState.isRunning = false;
+      backgroundJobState.lastRunTime = new Date();
+      
+      // Schedule the next run
+      backgroundJobState.timerId = setTimeout(runAutoFetchJob, backgroundJobState.currentInterval);
+    }
+  }
+  
+  // Start the auto-fetch job immediately
+  runAutoFetchJob();
+}
+
+// Initialize the app
+initializeApp();
 
 // Export for Vercel serverless deployment
 module.exports = app; 
@@ -2578,6 +2772,25 @@ app.get('/api/*', (req, res) => {
       '/api/fetch-status',
       '/api/force-save',
       '/api/force-refresh',
+      '/'
+    ]
+  });
+});
+
+// Add a catch-all route for API endpoints
+app.get('/api/*', (req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    availableEndpoints: [
+      '/api/stats',
+      '/api/distributed',
+      '/api/sol',
+      '/api/refresh',
+      '/api/fetch-all',
+      '/api/fetch-status',
+      '/api/force-save',
+      '/api/force-refresh',
+      '/api/background-job/:action',
       '/'
     ]
   });
