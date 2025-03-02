@@ -556,12 +556,16 @@ if (!token) {
             if (data.stats) {
               const stats = data.stats;
               
+              // Safely format values
+              const balance = formatSol(stats.currentSolBalance || "0.00");
+              const totalDistributed = formatSol(stats.totalSolDistributed || "0.00");
+              
               const message = 
-                `${stats.title} (Limited Data)\n\n` +
-                `💰 *Current Balance*: ${formatSol(stats.currentSolBalance)} SOL\n` +
-                `💸 *Total Distributed*: ${formatSol(stats.totalSolDistributed)} SOL\n` +
-                `📊 *Total Transactions*: ${stats.totalTransactions}\n\n` +
-                `🔗 [View on Solscan](${stats.solscanLink})\n\n` +
+                `${stats.title || "SOL Distribution Tracker"} (Limited Data)\n\n` +
+                `💰 *Current Balance*: ${balance} SOL\n` +
+                `💸 *Total Distributed*: ${totalDistributed} SOL\n` +
+                `📊 *Total Transactions*: ${stats.totalTransactions || "N/A"}\n\n` +
+                `🔗 [View on Solscan](${stats.solscanLink || "https://solscan.io"})\n\n` +
                 `⚠️ Note: Using fallback data due to API issues.`;
               
               await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -577,20 +581,33 @@ if (!token) {
           const apiVersion = data.apiVersion || 'Vercel';
           const environment = data.environment || 'production';
           
+          // Safely format values
+          const totalDistributed = formatSol(stats.totalSolDistributed || "0.00");
+          const totalReceived = formatSol(stats.totalReceived || "0.00");
+          const balance = formatSol(stats.currentSolBalance || "0.00");
+          const totalTx = stats.totalTransactions || "0";
+          const sentTx = stats.sentTransactions || (stats.totalTransactions - (stats.receivedTransactions || 0)) || "0";
+          const receivedTx = stats.receivedTransactions || "0";
+          const solTx = stats.solTransactions || stats.totalTransactions || "0";
+          const storedTx = stats.storedTransactions || stats.totalTransactions || "0";
+          
+          // Escape any special characters in the address
+          const safeAddress = address.replace(/([_*[\]()~`>#+=|{}.!-])/g, '\\$1');
+          
           const message = 
             `📊 *SOL DISTRIBUTION STATISTICS*\n\n` +
             `💰 *Financial Summary*\n` +
-            `• Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
-            `• Total Received: ${formatSol(stats.totalReceived || "0.00")} SOL\n` +
-            `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
+            `• Total Distributed: ${totalDistributed} SOL\n` +
+            `• Total Received: ${totalReceived} SOL\n` +
+            `• Current Balance: ${balance} SOL\n\n` +
             `📝 *Transaction Details*\n` +
-            `• Total Transactions: ${stats.totalTransactions}\n` +
-            `• Sent Transactions: ${stats.sentTransactions || (stats.totalTransactions - (stats.receivedTransactions || 0))}\n` +
-            `• Received Transactions: ${stats.receivedTransactions || "3"}\n` +
-            `• SOL Transactions: ${stats.solTransactions || stats.totalTransactions}\n` +
-            `• Stored Transactions: ${stats.storedTransactions || stats.totalTransactions}\n\n` +
+            `• Total Transactions: ${totalTx}\n` +
+            `• Sent Transactions: ${sentTx}\n` +
+            `• Received Transactions: ${receivedTx}\n` +
+            `• SOL Transactions: ${solTx}\n` +
+            `• Stored Transactions: ${storedTx}\n\n` +
             `🔗 *Wallet Information*\n` +
-            `• Address: ${address}\n` +
+            `• Address: ${safeAddress}\n` +
             `• [View on Solscan](${stats.solscanLink || `https://solscan.io/account/${address}`})\n\n` +
             `🔄 *Last Updated*: ${currentDate}\n\n` +
             `Environment: ${environment} | API Version: ${apiVersion}`;
@@ -678,32 +695,48 @@ if (!token) {
             const walletData = data.wallet || data.stats;
             const address = walletAddress || process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv';
             
+            // Safely format values to prevent Markdown parsing errors
+            const balance = formatSol(walletData.balance || walletData.currentSolBalance);
+            const totalDistributed = formatSol(walletData.totalDistributed || walletData.totalSolDistributed || "0.00");
+            const totalReceived = formatSol(walletData.totalReceived || "0.00");
+            
+            // Escape any special characters in the address
+            const safeAddress = address.replace(/([_*[\]()~`>#+=|{}.!-])/g, '\\$1');
+            
             message = 
               `💼 *WALLET BALANCE SUMMARY*\n\n` +
-              `💰 *Current Balance*: ${formatSol(walletData.balance || walletData.currentSolBalance)} SOL\n\n` +
+              `💰 *Current Balance*: ${balance} SOL\n\n` +
               `📊 *Additional Information*\n` +
-              `• Total Distributed: ${formatSol(walletData.totalDistributed || walletData.totalSolDistributed)} SOL\n` +
-              `• Total Received: ${formatSol(walletData.totalReceived)} SOL\n\n` +
+              `• Total Distributed: ${totalDistributed} SOL\n` +
+              `• Total Received: ${totalReceived} SOL\n\n` +
               `🔗 *Wallet Details*\n` +
-              `• Address: ${address}\n` +
+              `• Address: ${safeAddress}\n` +
               `• [View on Solscan](https://solscan.io/account/${address})\n\n` +
               `🔄 *Last Updated*: ${currentDate}\n\n` +
-              `💡 *Tip*: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
+              `💡 Tip: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
           } else {
             const stats = data.stats;
             const address = process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv';
             
+            // Safely format values to prevent Markdown parsing errors
+            const balance = formatSol(stats.currentSolBalance || "0.00");
+            const totalDistributed = formatSol(stats.totalSolDistributed || "0.00");
+            const totalReceived = formatSol(stats.totalReceived || "0.00");
+            
+            // Escape any special characters in the address
+            const safeAddress = address.replace(/([_*[\]()~`>#+=|{}.!-])/g, '\\$1');
+            
             message = 
               `💼 *WALLET BALANCE SUMMARY*\n\n` +
-              `💰 *Current Balance*: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
+              `💰 *Current Balance*: ${balance} SOL\n\n` +
               `📊 *Additional Information*\n` +
-              `• Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
-              `• Total Received: ${formatSol(stats.totalReceived || "0.00")} SOL\n\n` +
+              `• Total Distributed: ${totalDistributed} SOL\n` +
+              `• Total Received: ${totalReceived} SOL\n\n` +
               `🔗 *Wallet Details*\n` +
-              `• Address: ${address}\n` +
+              `• Address: ${safeAddress}\n` +
               `• [View on Solscan](${stats.solscanLink || `https://solscan.io/account/${address}`})\n\n` +
               `🔄 *Last Updated*: ${currentDate}\n\n` +
-              `💡 *Tip*: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
+              `💡 Tip: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
           }
           
           await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -761,9 +794,12 @@ if (!token) {
             if (data.stats) {
               const stats = data.stats;
               
+              // Safely format values
+              const totalDistributed = formatSol(stats.totalSolDistributed || "0.00");
+              
               const message = 
                 `💸 *Distribution Summary (Limited Data)*\n\n` +
-                `Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n\n` +
+                `Total Distributed: ${totalDistributed} SOL\n\n` +
                 `⚠️ Note: Using fallback data due to API issues.`;
               
               await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -776,16 +812,24 @@ if (!token) {
           const currentDate = new Date().toLocaleString();
           const stats = data.stats || {};
           
+          // Safely format values
+          const totalDistributed = formatSol(stats.totalSolDistributed || "0.00");
+          const sentTx = stats.totalDistributions || stats.sentTransactions || "N/A";
+          const avgDistribution = formatSol(stats.averageDistribution || 
+            (stats.totalSolDistributed / (stats.totalDistributions || stats.sentTransactions || 1)));
+          const balance = formatSol(stats.currentSolBalance || "0.00");
+          const totalReceived = formatSol(stats.totalReceived || "0.00");
+          
           // Format the message with all available data
           const message = 
             `💸 *DISTRIBUTION SUMMARY*\n\n` +
-            `💰 *Total Distributed*: ${formatSol(stats.totalSolDistributed)} SOL\n\n` +
+            `💰 *Total Distributed*: ${totalDistributed} SOL\n\n` +
             `📊 *Distribution Details*\n` +
-            `• Sent Transactions: ${stats.totalDistributions || stats.sentTransactions || "N/A"}\n` +
-            `• Average Per Transaction: ${formatSol(stats.averageDistribution || (stats.totalSolDistributed / (stats.totalDistributions || stats.sentTransactions || 1)))} SOL\n\n` +
+            `• Sent Transactions: ${sentTx}\n` +
+            `• Average Per Transaction: ${avgDistribution} SOL\n\n` +
             `💼 *Wallet Status*\n` +
-            `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n` +
-            `• Total Received: ${formatSol(stats.totalReceived || "0.00")} SOL\n\n` +
+            `• Current Balance: ${balance} SOL\n` +
+            `• Total Received: ${totalReceived} SOL\n\n` +
             `🔄 *Last Updated*: ${currentDate}`;
           
           await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
@@ -855,12 +899,13 @@ if (!token) {
           transactions.forEach((tx, index) => {
             const date = new Date(tx.timestamp || tx.blockTime * 1000).toLocaleString();
             const type = tx.type === 'sent' ? '🔴 Sent' : '🟢 Received';
-            const amount = formatSol(tx.amount);
+            const amount = formatSol(tx.amount || "0.00");
+            const signature = tx.signature ? tx.signature.replace(/([_*[\]()~`>#+=|{}.!-])/g, '\\$1') : '';
             
             message += `*${index + 1}. ${type}*: ${amount} SOL\n`;
             message += `   📅 ${date}\n`;
-            if (tx.signature) {
-              message += `   🔗 [View on Solscan](https://solscan.io/tx/${tx.signature})\n`;
+            if (signature) {
+              message += `   🔗 [View on Solscan](https://solscan.io/tx/${signature})\n`;
             }
             message += '\n';
           });
