@@ -697,6 +697,189 @@ bot.onText(/\/balance(?:\s+([^\s]+))?/, async (msg, match) => {
   }
 });
 
+// Distributed command - Shows total distributed amount and details
+bot.onText(/\/distributed/, async (msg) => {
+  const chatId = msg.chat.id;
+  
+  try {
+    const statusMessage = await bot.sendMessage(chatId, '⏳ Fetching distributed amount...');
+    
+    // Set a timeout for the API request
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Request timed out after 8 seconds')), 8000)
+    );
+    
+    // Create the actual fetch promise
+    const fetchPromise = fetchFromAPI('/api/distributed?limit=10');
+    
+    // Race the fetch against the timeout
+    const data = await Promise.race([fetchPromise, timeoutPromise])
+      .catch(async (error) => {
+        // If the first attempt fails, try with minimal data
+        if (error.message.includes('timeout') || error.message.includes('15s limit')) {
+          await bot.editMessageText('⏳ First attempt timed out, trying with minimal data...', {
+            chat_id: chatId,
+            message_id: statusMessage.message_id
+          });
+          
+          // Try with minimal data
+          return fetchFromAPI('/api/stats?limit=1&minimal=true');
+        }
+        throw error;
+      });
+    
+    if (!data.success) {
+      // If we have fallback stats data, use it
+      if (data.stats) {
+        const stats = data.stats;
+        
+        const message = 
+          `💸 *Distribution Summary (Limited Data)*\n\n` +
+          `Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n\n` +
+          `⚠️ Note: Using fallback data due to API issues.`;
+        
+        await bot.editMessageText(message, {
+          chat_id: chatId,
+          message_id: statusMessage.message_id,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+      
+      throw new Error(data.error?.message || 'Unknown error');
+    }
+    
+    const currentDate = new Date().toLocaleString();
+    const stats = data.stats || {};
+    
+    // Format the message with all available data
+    const message = 
+      `💸 *DISTRIBUTION SUMMARY*\n\n` +
+      `💰 *Total Distributed*: ${formatSol(stats.totalSolDistributed)} SOL\n\n` +
+      `📊 *Distribution Details*\n` +
+      `• Sent Transactions: ${stats.totalDistributions || stats.sentTransactions || "N/A"}\n` +
+      `• Average Per Transaction: ${formatSol(stats.averageDistribution || (stats.totalSolDistributed / (stats.totalDistributions || stats.sentTransactions || 1)))} SOL\n\n` +
+      `💼 *Wallet Status*\n` +
+      `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n` +
+      `• Total Received: ${formatSol(stats.totalReceived || "0.00")} SOL\n\n` +
+      `🔄 *Last Updated*: ${currentDate}`;
+    
+    await bot.editMessageText(message, {
+      chat_id: chatId,
+      message_id: statusMessage.message_id,
+      parse_mode: 'Markdown'
+    });
+  } catch (error) {
+    console.error('Error fetching distributed amount:', error.message);
+    
+    // Provide a more helpful error message
+    let errorMessage = '⏱️ *API Timeout Error*\n\n';
+    
+    if (error.message.includes('timeout') || error.message.includes('15s limit') || error.message.includes('high load')) {
+      errorMessage += 'The API is currently experiencing high load. Try again later or check the stats command for a summary.';
+    } else if (error.message.includes('rate limit')) {
+      errorMessage += 'The API is currently rate limited. Please try again in a few minutes.';
+    } else if (error.message.includes('server error')) {
+      errorMessage += 'The API server is experiencing issues. Please try again later.';
+    } else {
+      errorMessage = '❌ Error fetching distributed amount: ' + error.message;
+    }
+    
+    bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
+  }
+});
+
+// Transactions command - Shows recent transactions
+bot.onText(/\/transactions/, async (msg) => {
+  const chatId = msg.chat.id;
+  
+  try {
+    const statusMessage = await bot.sendMessage(chatId, '⏳ Fetching recent transactions...');
+    
+    // Set a timeout for the API request
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Request timed out after 8 seconds')), 8000)
+    );
+    
+    // Create the actual fetch promise
+    const fetchPromise = fetchFromAPI('/api/transactions?limit=5');
+    
+    // Race the fetch against the timeout
+    const data = await Promise.race([fetchPromise, timeoutPromise])
+      .catch(async (error) => {
+        // If the first attempt fails, try with minimal data
+        if (error.message.includes('timeout') || error.message.includes('15s limit')) {
+          await bot.editMessageText('⏳ First attempt timed out, trying with minimal data...', {
+            chat_id: chatId,
+            message_id: statusMessage.message_id
+          });
+          
+          // Try with minimal data
+          return fetchFromAPI('/api/transactions?limit=3&minimal=true');
+        }
+        throw error;
+      });
+    
+    if (!data.success) {
+      throw new Error(data.error?.message || 'Unknown error');
+    }
+    
+    const transactions = data.transactions?.allTransactions || [];
+    const currentDate = new Date().toLocaleString();
+    
+    if (transactions.length === 0) {
+      await bot.editMessageText('📝 *No Transactions Found*\n\nNo recent transactions were found in the database.', {
+        chat_id: chatId,
+        message_id: statusMessage.message_id,
+        parse_mode: 'Markdown'
+      });
+      return;
+    }
+    
+    // Format the message with transaction data
+    let message = `📝 *RECENT TRANSACTIONS*\n\n`;
+    
+    transactions.forEach((tx, index) => {
+      const date = new Date(tx.timestamp || tx.blockTime * 1000).toLocaleString();
+      const type = tx.type === 'sent' ? '🔴 Sent' : '🟢 Received';
+      const amount = formatSol(tx.amount);
+      
+      message += `*${index + 1}. ${type}*: ${amount} SOL\n`;
+      message += `   📅 ${date}\n`;
+      if (tx.signature) {
+        message += `   🔗 [View on Solscan](https://solscan.io/tx/${tx.signature})\n`;
+      }
+      message += '\n';
+    });
+    
+    message += `🔄 *Last Updated*: ${currentDate}\n\n`;
+    message += `Total Transactions: ${data.transactions?.totalStoredTransactions || transactions.length}`;
+    
+    await bot.editMessageText(message, {
+      chat_id: chatId,
+      message_id: statusMessage.message_id,
+      parse_mode: 'Markdown'
+    });
+  } catch (error) {
+    console.error('Error fetching transactions:', error.message);
+    
+    // Provide a more helpful error message
+    let errorMessage = '⏱️ *API Timeout Error*\n\n';
+    
+    if (error.message.includes('timeout') || error.message.includes('15s limit') || error.message.includes('high load')) {
+      errorMessage += 'The API is currently experiencing high load. Try again later or check the stats command for a summary.';
+    } else if (error.message.includes('rate limit')) {
+      errorMessage += 'The API is currently rate limited. Please try again in a few minutes.';
+    } else if (error.message.includes('server error')) {
+      errorMessage += 'The API server is experiencing issues. Please try again later.';
+    } else {
+      errorMessage = '❌ Error fetching transactions: ' + error.message;
+    }
+    
+    bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
+  }
+});
+
 // Start command
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
@@ -709,6 +892,8 @@ bot.onText(/\/start/, (msg) => {
     "/stats - View distribution statistics\n" +
     "/balance - Check distribution wallet balance\n" +
     "/balance [address] - Check any wallet's balance\n" +
+    "/distributed - View total distributed amount\n" +
+    "/transactions - View recent transactions\n" +
     "/help - Show this help message";
   
   bot.sendMessage(chatId, message);
@@ -739,6 +924,8 @@ bot.onText(/\/help/, (msg) => {
     "*/stats* - View distribution statistics\n" +
     "*/balance* - Check distribution wallet balance\n" +
     "*/balance [address]* - Check any wallet's balance\n" +
+    "*/distributed* - View total distributed amount\n" +
+    "*/transactions* - View recent transactions\n" +
     "*/help* - Show this help message\n\n";
   
   // Add admin commands if the user is an admin
