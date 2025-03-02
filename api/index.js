@@ -28,10 +28,17 @@ const CONFIG = {
     requestsPerSecond: 0.2,      // Ultra conservative: 1 request per 5 seconds
     retryDelay: 15000,           // 15 seconds base delay for retries
     maxRetries: 3,                // Maximum number of retries for failed requests
-    batchSize: 1,                // Process only one transaction at a time
-    batchDelay: 10000,           // 10 seconds between batches
-    initialBackoff: 30000,       // 30 seconds initial backoff time
+    maxQueueSize: 10             // Maximum number of requests to queue
   },
+
+  // API Security
+  security: {
+    apiKeyRequired: process.env.API_KEY ? true : false,
+    apiKey: process.env.API_KEY,
+    // List of paths that don't require API key authentication
+    publicPaths: ['/api/stats', '/api/health', '/']
+  },
+  
   // Transaction fetching
   transactions: {
     maxTransactionsToFetch: 10,  // Set to exactly 10 transactions per fetch
@@ -170,8 +177,50 @@ class RateLimiter {
 // Create a rate limiter instance
 const heliusRateLimiter = new RateLimiter(CONFIG.rateLimits.requestsPerSecond);
 
-// Create Express app
+// Initialize Express for Vercel serverless function
 const app = express();
+app.use(cors());
+app.use(express.json());
+
+// API Key Authentication Middleware
+function authenticateApiKey(req, res, next) {
+  // Skip authentication for public paths
+  if (CONFIG.security.publicPaths.includes(req.path)) {
+    return next();
+  }
+  
+  // Skip API key validation if not configured
+  if (!CONFIG.security.apiKeyRequired) {
+    return next();
+  }
+  
+  // Get API key from headers or query parameters
+  const apiKey = req.headers['x-api-key'] || req.query.api_key;
+  
+  // Skip API key validation for the Telegram bot
+  const isTelegramBot = req.headers['user-agent']?.includes('TelegramBot');
+  const isLocalRequest = req.headers['x-forwarded-for'] === '127.0.0.1' || req.connection.remoteAddress === '127.0.0.1';
+  
+  if (isTelegramBot || isLocalRequest) {
+    return next();
+  }
+  
+  // Validate API key
+  if (!apiKey || apiKey !== CONFIG.security.apiKey) {
+    return res.status(401).json({
+      success: false,
+      error: {
+        message: 'Unauthorized: Invalid or missing API key',
+        code: 401
+      }
+    });
+  }
+  
+  next();
+}
+
+// Apply authentication middleware
+app.use(authenticateApiKey);
 
 // In-memory storage for transactions - NOTE: This won't persist between serverless function invocations
 // For Vercel, we'll need to fetch fresh data on each request
@@ -219,14 +268,6 @@ API Environment:
 - TAX_TOKEN_MINT_ADDRESS: ${process.env.TAX_TOKEN_MINT_ADDRESS ? '✓ Set' : '✗ Not set'}
 - TELEGRAM_BOT_TOKEN: ${process.env.TELEGRAM_BOT_TOKEN ? '✓ Set' : '✗ Not set'}
 `);
-
-// Middleware
-app.use(cors({
-  origin: '*', // Allow all origins for now, you can restrict this later
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.use(express.json());
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -533,7 +574,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 10) { // Reduced from 100 to 10
+async function fetchTransactionsVercel(limit = 5) { // Reduced from 10 to 5 to prevent timeouts
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -570,7 +611,7 @@ async function fetchTransactionsVercel(limit = 10) { // Reduced from 100 to 10
             'Content-Type': 'application/json',
             'x-api-key': HELIUS_API_KEY
           },
-          timeout: 10000 // 10 second timeout
+          timeout: 5000 // Reduced from 10s to 5s timeout
         });
         
         success = true;
@@ -603,13 +644,13 @@ async function fetchTransactionsVercel(limit = 10) { // Reduced from 100 to 10
     const signatures = response.data.result;
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
-    // For Vercel, we'll fetch transaction details for exactly 10 transactions to avoid timeouts
-    const maxToProcess = Math.min(signatures.length, 10); // Process exactly 10 transactions
+    // For Vercel, we'll fetch transaction details for exactly 5 transactions to avoid timeouts
+    const maxToProcess = Math.min(signatures.length, 5); // Reduced from 10 to 5
     const processedTransactions = [];
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 8000; // 8 seconds time limit to be conservative
+    const timeLimit = 5000; // Reduced from 8s to 5s time limit to be more conservative
     
     // Process signatures one by one
     for (let i = 0; i < maxToProcess; i++) {
@@ -1361,6 +1402,10 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
   console.log('Getting overall SOL statistics...');
   
   try {
+    // Get limit parameter from request, default to 5
+    const limit = parseInt(req.query.limit) || 5;
+    console.log(`Using limit of ${limit} transactions`);
+    
     // For Vercel, use a simplified approach
     if (process.env.VERCEL) {
       // Try to load from storage first
@@ -1371,8 +1416,8 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
         console.log(`Using ${transactions.length} transactions from storage`);
         fetchedTransactions = transactions;
       } else {
-        // If no stored data, fetch fresh data
-        fetchedTransactions = await fetchTransactionsVercel(20);
+        // If no stored data, fetch fresh data with limited transactions
+        fetchedTransactions = await fetchTransactionsVercel(limit);
         
         // Save the fetched transactions to storage
         if (fetchedTransactions.length > 0) {
