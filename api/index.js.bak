@@ -16,7 +16,7 @@ const STORAGE_CONFIG = {
   vercelBlobEnabled: true, // Always enable Blob storage
   storageKey: 'transactions_data',
   blobStoragePath: 'transactions/data.json',
-  maxStoredTransactions: 1000000, // Store up to 1 million transactions (effectively unlimited)
+  maxStoredTransactions: 10000, // Store up to 10,000 transactions
   storageInterval: 5 * 1000, // How often to save data (5 seconds)
   lastStorageTime: null
 };
@@ -27,24 +27,16 @@ const CONFIG = {
   rateLimits: {
     requestsPerSecond: 0.2,      // Ultra conservative: 1 request per 5 seconds
     retryDelay: 15000,           // 15 seconds base delay for retries
-    maxRetries: 3,                // Maximum number of retries for failed requests
+    maxRetries: 3,               // Maximum number of retries for failed requests
     batchSize: 1,                // Process only one transaction at a time
     batchDelay: 10000,           // 10 seconds between batches
     initialBackoff: 30000,       // 30 seconds initial backoff time
   },
   // Transaction fetching
   transactions: {
-    maxTransactionsToFetch: 10,  // Set to exactly 10 transactions per fetch
+    maxTransactionsToFetch: 5,   // Reduced from 10 to 5 to speed up processing
     cacheExpiration: 30 * 60 * 1000, // Cache expiration time in ms (30 minutes)
     maxTransactionsPerRequest: 2, // Reduced from 5 to 2 to avoid timeouts
-  },
-  // Background jobs
-  backgroundJobs: {
-    enabled: true,
-    autoFetchInterval: 60 * 1000, // Auto-fetch every 60 seconds (reduced from 3 minutes)
-    maxConsecutiveErrors: 3,
-    errorBackoffMultiplier: 2,
-    maxBackoffInterval: 30 * 60 * 1000 // Maximum backoff of 30 minutes
   },
   // Vercel optimization
   vercel: {
@@ -178,35 +170,11 @@ const app = express();
 const transactions = [];
 let lastFetchTimestamp = null;
 
-// Background job state
-const backgroundJobState = {
-  isRunning: false,
-  lastRunTime: null,
-  consecutiveErrors: 0,
-  currentInterval: CONFIG.backgroundJobs.autoFetchInterval,
-  timerId: null
-};
-
 // Constants
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL;
-let DISTRIBUTION_WALLET_ADDRESS = process.env.DISTRIBUTION_WALLET_ADDRESS;
+const DISTRIBUTION_WALLET_ADDRESS = process.env.DISTRIBUTION_WALLET_ADDRESS;
 const TAX_TOKEN_MINT_ADDRESS = process.env.TAX_TOKEN_MINT_ADDRESS;
-
-// Track additional wallets and user wallets
-const trackedWallets = new Set();
-const userWallets = new Map();
-const lastNotifiedTimes = new Map();
-if (DISTRIBUTION_WALLET_ADDRESS) {
-  trackedWallets.add(DISTRIBUTION_WALLET_ADDRESS);
-}
-
-// Make functions available globally for the Telegram bot
-global.trackedWallets = trackedWallets;
-global.userWallets = userWallets;
-global.lastNotifiedTimes = lastNotifiedTimes;
-global.getRewardsForWallet = getRewardsForWallet;
-// We'll set global.storage after the storage object is defined
 
 // Log environment variables for debugging (without exposing sensitive values)
 console.log(`
@@ -399,9 +367,8 @@ const storage = {
         return false;
       }
       
-      // Store all transactions without limiting
-      // Note: We keep the maxStoredTransactions as a safety valve for extreme cases
-      const transactionsToStore = transactions;
+      // Limit the number of transactions we store
+      const transactionsToStore = transactions.slice(0, STORAGE_CONFIG.maxStoredTransactions);
       
       // Prepare data to store
       const dataToStore = {
@@ -476,9 +443,6 @@ const storage = {
   }
 };
 
-// Now make the storage object available globally for the Telegram bot
-global.storage = storage;
-
 // Transaction class
 class Transaction {
   constructor(data) {
@@ -533,7 +497,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 10) { // Reduced from 100 to 10
+async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 100
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -1069,13 +1033,7 @@ function getStats() {
       totalTransactions: transactions.length,
       transactionsByType: {},
       transactionsByToken: {},
-      totalAmountByToken: {},
-      trackedWallets: {
-        count: trackedWallets.size,
-        addresses: Array.from(trackedWallets),
-        mainWallet: DISTRIBUTION_WALLET_ADDRESS
-      },
-      transactionsByWallet: {}
+      totalAmountByToken: {}
     };
     
     // Process each transaction
@@ -1090,19 +1048,6 @@ function getStats() {
       if (tx.amount) {
         stats.totalAmountByToken[tx.token] = (stats.totalAmountByToken[tx.token] || 0) + tx.amount;
       }
-      
-      // Count transactions by wallet (sender or receiver)
-      if (tx.sender) {
-        stats.transactionsByWallet[tx.sender] = stats.transactionsByWallet[tx.sender] || { sent: 0, received: 0, total: 0 };
-        stats.transactionsByWallet[tx.sender].sent++;
-        stats.transactionsByWallet[tx.sender].total++;
-      }
-      
-      if (tx.receiver) {
-        stats.transactionsByWallet[tx.receiver] = stats.transactionsByWallet[tx.receiver] || { sent: 0, received: 0, total: 0 };
-        stats.transactionsByWallet[tx.receiver].received++;
-        stats.transactionsByWallet[tx.receiver].total++;
-      }
     }
     
     return stats;
@@ -1112,131 +1057,8 @@ function getStats() {
       totalTransactions: 0,
       transactionsByType: {},
       transactionsByToken: {},
-      totalAmountByToken: {},
-      trackedWallets: {
-        count: trackedWallets.size,
-        addresses: Array.from(trackedWallets),
-        mainWallet: DISTRIBUTION_WALLET_ADDRESS
-      },
-      transactionsByWallet: {}
+      totalAmountByToken: {}
     };
-  }
-}
-
-// Get rewards for a specific wallet
-async function getRewardsForWallet(walletAddress) {
-  try {
-    console.log(`Getting rewards for wallet: ${walletAddress}`);
-    
-    // Filter transactions where this wallet is the receiver and the sender is the distribution wallet
-    const receivedTransactions = transactions.filter(tx => 
-      tx.token === 'SOL' && 
-      tx.type === 'sent' && 
-      tx.receiver === walletAddress && 
-      tx.sender === DISTRIBUTION_WALLET_ADDRESS
-    );
-    
-    // Calculate total amount received
-    const totalReceived = receivedTransactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
-    
-    // Sort transactions by blockTime (most recent first)
-    const sortedTransactions = [...receivedTransactions].sort((a, b) => 
-      (b.blockTime || 0) - (a.blockTime || 0)
-    );
-    
-    // Return wallet rewards data
-    return {
-      walletAddress,
-      transactionCount: receivedTransactions.length,
-      totalReceived,
-      recentTransactions: sortedTransactions.slice(0, 10)
-    };
-  } catch (error) {
-    console.error(`Error getting rewards for wallet ${walletAddress}:`, error);
-    return {
-      walletAddress,
-      transactionCount: 0,
-      totalReceived: 0,
-      recentTransactions: []
-    };
-  }
-}
-
-// Check for new rewards and notify users
-async function checkAndNotifyNewRewards() {
-  try {
-    console.log('Checking for new rewards to notify users...');
-    
-    // Skip if no Telegram bot token or if in Vercel environment
-    if (!process.env.TELEGRAM_BOT_TOKEN || process.env.VERCEL) {
-      console.log('Skipping reward notifications: Telegram bot not available or running in Vercel');
-      return;
-    }
-    
-    // Initialize Telegram bot
-    const TelegramBot = require('node-telegram-bot-api');
-    const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN);
-    
-    // Get user wallets
-    if (!global.userWallets || global.userWallets.size === 0) {
-      console.log('No user wallets registered for notifications');
-      return;
-    }
-    
-    // Check each user wallet for new rewards
-    for (const [chatId, walletAddress] of global.userWallets.entries()) {
-      // Get last notified time for this wallet
-      const lastNotifiedTime = global.lastNotifiedTimes?.get(chatId) || 0;
-      
-      // Get transactions where this wallet is the receiver and the sender is the distribution wallet
-      const newTransactions = transactions.filter(tx => 
-        tx.token === 'SOL' && 
-        tx.type === 'sent' && 
-        tx.receiver === walletAddress && 
-        tx.sender === DISTRIBUTION_WALLET_ADDRESS &&
-        tx.blockTime > lastNotifiedTime
-      );
-      
-      if (newTransactions.length > 0) {
-        // Calculate total new rewards
-        const totalNewRewards = newTransactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
-        
-        // Format notification message
-        let message = `🎉 *New Rewards Received!* 🎉\n\n`;
-        message += `You've received ${totalNewRewards.toFixed(7)} SOL in ${newTransactions.length} transaction(s).\n\n`;
-        
-        if (newTransactions.length <= 5) {
-          // Show details for each transaction if there are 5 or fewer
-          message += `*Transaction Details:*\n`;
-          newTransactions.forEach((tx, i) => {
-            const date = new Date(tx.timestamp).toLocaleString();
-            message += `${i+1}. ${tx.amount.toFixed(7)} SOL on ${date}\n`;
-          });
-        } else {
-          // Just show the most recent transaction if there are more than 5
-          const mostRecent = newTransactions.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0))[0];
-          const date = new Date(mostRecent.timestamp).toLocaleString();
-          message += `Most recent: ${mostRecent.amount.toFixed(7)} SOL on ${date}\n`;
-          message += `Use /myrewards to see all transactions.`;
-        }
-        
-        // Send notification
-        try {
-          await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-          console.log(`Sent reward notification to chat ${chatId} for wallet ${walletAddress}`);
-          
-          // Update last notified time
-          if (!global.lastNotifiedTimes) {
-            global.lastNotifiedTimes = new Map();
-          }
-          global.lastNotifiedTimes.set(chatId, Date.now());
-        } catch (error) {
-          console.error(`Error sending notification to chat ${chatId}:`, error);
-        }
-      }
-    }
-  } catch (error) {
-    console.error('Error checking for new rewards:', error);
   }
 }
 
@@ -1267,20 +1089,20 @@ const asyncHandler = fn => async (req, res, next) => {
 // Root route handler
 app.get('/', (req, res) => {
   res.json({
-    name: "Distribution Tracker API",
-    version: "1.0.0",
+    name: 'Distribution Tracker API',
+    version: '1.0.0',
     endpoints: [
-      "/api/stats",
-      "/api/distributed",
-      "/api/sol",
-      "/api/refresh",
-      "/api/fetch-all",
-      "/api/fetch-status",
-      "/api/force-save",
-      "/api/force-refresh",
-      "/api/help"
+      '/api/stats',
+      '/api/distributed',
+      '/api/sol',
+      '/api/refresh',
+      '/api/fetch-all',
+      '/api/fetch-status',
+      '/api/force-save',
+      '/api/force-refresh',
+      '/api/help'
     ],
-    message: "Use /api/help for more information about the endpoints"
+    message: 'Use /api/help for more information about the endpoints'
   });
 });
 
@@ -1446,25 +1268,6 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
       lastFetch: lastFetchTimestamp,
       environment: process.env.NODE_ENV || 'development',
       vercel: false,
-      cacheStatus: {
-        transactionCount: transactions.length,
-        note: "Using cached data when available"
-      },
-      stats
-    });
-    
-    // Return statistics with tracked wallet info prominently displayed
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      lastFetch: lastFetchTimestamp,
-      environment: process.env.NODE_ENV || 'development',
-      vercel: process.env.VERCEL ? true : false,
-      trackedWallets: {
-        count: trackedWallets.size,
-        addresses: Array.from(trackedWallets),
-        mainWallet: DISTRIBUTION_WALLET_ADDRESS
-      },
       cacheStatus: {
         transactionCount: transactions.length,
         note: "Using cached data when available"
@@ -2178,14 +1981,8 @@ async function fetchAllHistoricalTransactions() {
   try {
     console.log('[Vercel] Starting historical transaction fetch...');
     
-    if (!HELIUS_API_KEY || !HELIUS_RPC_URL) {
+    if (!HELIUS_API_KEY || !HELIUS_RPC_URL || !DISTRIBUTION_WALLET_ADDRESS) {
       console.error('Missing required environment variables for Helius service');
-      return [];
-    }
-    
-    // Check if we have any wallets to track
-    if (trackedWallets.size === 0) {
-      console.log('No wallets to track. Please add a wallet first.');
       return [];
     }
     
@@ -2200,13 +1997,13 @@ async function fetchAllHistoricalTransactions() {
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
-    const batchSize = 10; // Reduced to 10 signatures at a time
+    const batchSize = 50; // Fetch 50 signatures at a time
     let batchCount = 0;
-    const maxBatches = 1; // Set to 1 to ensure only one batch of 10 transactions per run
+    const maxBatches = 5; // Increased from 2 to 5 to fetch more transactions per run
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 13000; // Keep the same time limit
+    const timeLimit = 12000; // Increased from 8 to 12 seconds to allow more time for fetching
     
     while (hasMore && batchCount < maxBatches) {
       // Check if we're approaching the time limit
@@ -2595,19 +2392,7 @@ app.get('/api/fetch-status', asyncHandler(async (req, res) => {
       ? transactions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]
       : null;
     
-    // Get background job status
-    const backgroundJobStatus = {
-      enabled: CONFIG.backgroundJobs.enabled,
-      isRunning: backgroundJobState.isRunning,
-      lastRunTime: backgroundJobState.lastRunTime,
-      nextRunTime: backgroundJobState.lastRunTime 
-        ? new Date(backgroundJobState.lastRunTime.getTime() + backgroundJobState.currentInterval)
-        : null,
-      currentInterval: `${backgroundJobState.currentInterval / 1000} seconds`,
-      consecutiveErrors: backgroundJobState.consecutiveErrors
-    };
-    
-    // Return response
+    // Return status
     res.json({
       success: true,
       timestamp: new Date().toISOString(),
@@ -2618,15 +2403,16 @@ app.get('/api/fetch-status', asyncHandler(async (req, res) => {
         solTransactions: solTransactions.length,
         sentTransactions: sentTransactions.length,
         receivedTransactions: receivedTransactions.length,
-        mostRecentTransaction: mostRecentTransaction ? {
-          signature: mostRecentTransaction.signature,
-          timestamp: mostRecentTransaction.timestamp,
-          type: mostRecentTransaction.type,
-          amount: mostRecentTransaction.amount
-        } : null,
         lastFetchTimestamp: lastFetchTimestamp,
-        backgroundJob: backgroundJobStatus
-      }
+        mostRecentTransactionTimestamp: mostRecentTransaction ? mostRecentTransaction.timestamp : null,
+        mostRecentTransactionSignature: mostRecentTransaction ? mostRecentTransaction.signature : null,
+        storageConfig: {
+          vercelKVEnabled: STORAGE_CONFIG.vercelKVEnabled,
+          vercelBlobEnabled: STORAGE_CONFIG.vercelBlobEnabled,
+          maxStoredTransactions: STORAGE_CONFIG.maxStoredTransactions
+        }
+      },
+      message: 'Transaction fetch status retrieved successfully'
     });
   } catch (error) {
     console.error('Error in /api/fetch-status:', error);
@@ -2634,108 +2420,6 @@ app.get('/api/fetch-status', asyncHandler(async (req, res) => {
       success: false,
       error: {
         message: 'Failed to get transaction fetch status',
-        details: error.message
-      }
-    });
-  }
-}));
-
-// Add a new endpoint to control background jobs
-app.get('/api/background-job/:action', asyncHandler(async (req, res) => {
-  const action = req.params.action;
-  console.log(`Background job control: ${action}`);
-  
-  try {
-    let message = '';
-    let success = true;
-    
-    switch (action) {
-      case 'start':
-        if (!CONFIG.backgroundJobs.enabled) {
-          CONFIG.backgroundJobs.enabled = true;
-          startBackgroundJobs();
-          message = 'Background jobs started successfully';
-        } else if (backgroundJobState.timerId) {
-          message = 'Background jobs are already running';
-        } else {
-          startBackgroundJobs();
-          message = 'Background jobs restarted successfully';
-        }
-        break;
-        
-      case 'stop':
-        if (backgroundJobState.timerId) {
-          clearTimeout(backgroundJobState.timerId);
-          backgroundJobState.timerId = null;
-          backgroundJobState.isRunning = false;
-          CONFIG.backgroundJobs.enabled = false;
-          message = 'Background jobs stopped successfully';
-        } else {
-          message = 'Background jobs are not running';
-        }
-        break;
-        
-      case 'run-now':
-        // Trigger a fetch job immediately
-        fetchAllHistoricalTransactions()
-          .then(newTransactions => {
-            console.log(`Manual job run completed: fetched ${newTransactions.length} new transactions`);
-          })
-          .catch(err => {
-            console.error('Error in manual job run:', err);
-          });
-        
-        message = 'Manual job run triggered';
-        break;
-        
-      case 'reset':
-        // Reset the background job state
-        if (backgroundJobState.timerId) {
-          clearTimeout(backgroundJobState.timerId);
-        }
-        
-        backgroundJobState.isRunning = false;
-        backgroundJobState.lastRunTime = null;
-        backgroundJobState.consecutiveErrors = 0;
-        backgroundJobState.currentInterval = CONFIG.backgroundJobs.autoFetchInterval;
-        backgroundJobState.timerId = null;
-        
-        // Restart if enabled
-        if (CONFIG.backgroundJobs.enabled) {
-          startBackgroundJobs();
-        }
-        
-        message = 'Background job state reset successfully';
-        break;
-        
-      default:
-        success = false;
-        message = `Unknown action: ${action}. Valid actions are: start, stop, run-now, reset`;
-    }
-    
-    // Return response
-    res.json({
-      success,
-      timestamp: new Date().toISOString(),
-      action,
-      message,
-      backgroundJobStatus: {
-        enabled: CONFIG.backgroundJobs.enabled,
-        isRunning: backgroundJobState.isRunning,
-        lastRunTime: backgroundJobState.lastRunTime,
-        nextRunTime: backgroundJobState.lastRunTime 
-          ? new Date(backgroundJobState.lastRunTime.getTime() + backgroundJobState.currentInterval)
-          : null,
-        currentInterval: `${backgroundJobState.currentInterval / 1000} seconds`,
-        consecutiveErrors: backgroundJobState.consecutiveErrors
-      }
-    });
-  } catch (error) {
-    console.error(`Error in /api/background-job/${action}:`, error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: `Failed to ${action} background job`,
         details: error.message
       }
     });
@@ -2767,88 +2451,21 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Initialize the app
-async function initializeApp() {
-  try {
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, async () => {
+    console.log(`Server running on port ${PORT}`);
     // Initialize storage
     await storage.init();
-    
-    // Start background jobs if enabled
-    if (CONFIG.backgroundJobs.enabled) {
-      startBackgroundJobs();
-    }
-    
-    // Start the server
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error('Error initializing app:', error);
-  }
+  });
+} else {
+  // For production, initialize storage when the module is loaded
+  storage.init().catch(err => console.error('Error initializing storage:', err));
 }
 
-// Function to start background jobs
-function startBackgroundJobs() {
-  console.log('Starting background jobs for continuous data collection...');
-  
-  // Function to run the auto-fetch job
-  async function runAutoFetchJob() {
-    if (backgroundJobState.isRunning) {
-      console.log('Auto-fetch job already running, skipping this run');
-      return;
-    }
-    
-    backgroundJobState.isRunning = true;
-    
-    try {
-      console.log(`Running auto-fetch job at ${new Date().toISOString()}`);
-      
-      // Fetch historical transactions
-      const newTransactions = await fetchAllHistoricalTransactions();
-      
-      console.log(`Auto-fetch job completed: fetched ${newTransactions.length} new transactions`);
-      
-      // Check for new rewards and notify users
-      if (newTransactions.length > 0) {
-        console.log('Checking for new rewards to notify users...');
-        await checkAndNotifyNewRewards();
-      }
-      
-      // Reset consecutive errors on success
-      backgroundJobState.consecutiveErrors = 0;
-      backgroundJobState.currentInterval = CONFIG.backgroundJobs.autoFetchInterval;
-      
-    } catch (error) {
-      console.error('Error in auto-fetch job:', error);
-      
-      // Increase consecutive errors and apply backoff
-      backgroundJobState.consecutiveErrors++;
-      
-      if (backgroundJobState.consecutiveErrors > CONFIG.backgroundJobs.maxConsecutiveErrors) {
-        // Apply backoff to the interval
-        backgroundJobState.currentInterval = Math.min(
-          backgroundJobState.currentInterval * CONFIG.backgroundJobs.errorBackoffMultiplier,
-          CONFIG.backgroundJobs.maxBackoffInterval
-        );
-        
-        console.log(`Backing off auto-fetch job due to errors. New interval: ${backgroundJobState.currentInterval / 1000} seconds`);
-      }
-    } finally {
-      backgroundJobState.isRunning = false;
-      backgroundJobState.lastRunTime = new Date();
-      
-      // Schedule the next run
-      backgroundJobState.timerId = setTimeout(runAutoFetchJob, backgroundJobState.currentInterval);
-    }
-  }
-  
-  // Start the auto-fetch job immediately
-  runAutoFetchJob();
-}
-
-// Initialize the app
-initializeApp();
+// Export for Vercel serverless deployment
+module.exports = app; 
 
 // Add a new endpoint to force save to Blob storage
 app.get('/api/force-save', asyncHandler(async (req, res) => {
@@ -2893,27 +2510,12 @@ app.get('/api/force-refresh', asyncHandler(async (req, res) => {
   console.log('Forcing full refresh of all transactions...');
   
   try {
-    // Clear existing transactions from both in-memory and MongoDB
-    try {
-      // Try to use MongoDB if available
-      try {
-        const Transaction = require('../src/models/Transaction');
-        await Transaction.clearAll();
-        console.log('Cleared all transactions from MongoDB');
-      } catch (error) {
-        console.warn('MongoDB clearAll failed:', error.message);
-      }
-    } catch (error) {
-      console.warn('Error importing Transaction model:', error.message);
-    }
-    
-    // Clear in-memory transactions
+    // Clear existing transactions
     transactions.length = 0;
     lastFetchTimestamp = null;
-    console.log('Cleared all in-memory transactions');
     
-    // Fetch fresh transactions - limited to 10
-    const fetchedTransactions = await fetchTransactionsVercel(10);
+    // Fetch fresh transactions
+    const fetchedTransactions = await fetchTransactionsVercel(100);
     
     // Save the fetched transactions to storage
     if (fetchedTransactions.length > 0) {
@@ -2927,13 +2529,11 @@ app.get('/api/force-refresh', asyncHandler(async (req, res) => {
       await storage.save();
       STORAGE_CONFIG.storageInterval = originalInterval;
       
-      // Trigger historical fetch automatically after a short delay
-      console.log('Scheduling historical transaction fetch after force refresh...');
-      setTimeout(() => {
-        fetchAllHistoricalTransactions().catch(err => 
-          console.error('Error fetching historical transactions after force refresh:', err)
-        );
-      }, 5000); // Wait 5 seconds before starting historical fetch
+      // No longer trigger historical fetch automatically
+      // console.log('Triggering historical transaction fetch after force refresh...');
+      // fetchAllHistoricalTransactions().catch(err => 
+      //   console.error('Error fetching historical transactions after force refresh:', err)
+      // );
     }
     
     // Return response
@@ -2978,637 +2578,7 @@ app.get('/api/*', (req, res) => {
       '/api/fetch-status',
       '/api/force-save',
       '/api/force-refresh',
-      '/api/background-job/:action',
-      '/api/test-fetch',
-      '/api/test-all',
-      '/api/wallet/track',
-      '/api/wallet/tracked',
-      '/api/wallet/track/:address',
-      '/track-wallet',
       '/'
     ]
   });
 });
-
-// Add a test endpoint to verify transaction fetching and storage
-app.get('/api/test-fetch', asyncHandler(async (req, res) => {
-  console.log('Testing transaction fetching and storage...');
-  
-  try {
-    // Get current transaction count
-    const initialCount = transactions.length;
-    console.log(`Initial transaction count: ${initialCount}`);
-    
-    // Fetch exactly 10 transactions
-    const fetchedTransactions = await fetchTransactionsVercel(10);
-    console.log(`Fetched ${fetchedTransactions.length} transactions`);
-    
-    // Check if we're storing all transactions
-    const afterFetchCount = transactions.length;
-    console.log(`After fetch transaction count: ${afterFetchCount}`);
-    
-    // Return test results
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      testResults: {
-        initialTransactionCount: initialCount,
-        fetchedTransactionCount: fetchedTransactions.length,
-        afterFetchTransactionCount: afterFetchCount,
-        transactionsAdded: afterFetchCount - initialCount,
-        fetchLimitWorking: fetchedTransactions.length <= 10,
-        allTransactionsStored: afterFetchCount >= initialCount + fetchedTransactions.length - 5, // Allow for duplicates
-        storageConfig: {
-          maxStoredTransactions: STORAGE_CONFIG.maxStoredTransactions
-        },
-        fetchConfig: {
-          maxTransactionsToFetch: CONFIG.transactions.maxTransactionsToFetch
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Error in test-fetch endpoint:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Test failed',
-        details: error.message
-      }
-    });
-  }
-}));
-
-// Add endpoints for wallet tracking
-app.post('/api/wallet/track', express.json(), asyncHandler(async (req, res) => {
-  try {
-    const { walletAddress } = req.body;
-    
-    if (!walletAddress) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          message: 'Wallet address is required'
-        }
-      });
-    }
-    
-    // Validate wallet address (basic check for Solana address)
-    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(walletAddress)) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          message: 'Invalid Solana wallet address format'
-        }
-      });
-    }
-    
-    // Add to tracked wallets
-    trackedWallets.add(walletAddress);
-    
-    // If this is the first wallet, set it as the main distribution wallet
-    if (!DISTRIBUTION_WALLET_ADDRESS) {
-      DISTRIBUTION_WALLET_ADDRESS = walletAddress;
-      console.log(`Set main distribution wallet to: ${walletAddress}`);
-    }
-    
-    console.log(`Added wallet to tracking: ${walletAddress}`);
-    console.log(`Currently tracking ${trackedWallets.size} wallets`);
-    
-    // Start fetching transactions for this wallet
-    setTimeout(() => {
-      fetchTransactionsForWallet(walletAddress).catch(err => 
-        console.error(`Error fetching initial transactions for wallet ${walletAddress}:`, err)
-      );
-    }, 100);
-    
-    res.json({
-      success: true,
-      message: 'Wallet added to tracking',
-      walletAddress,
-      isMainWallet: walletAddress === DISTRIBUTION_WALLET_ADDRESS,
-      trackedWalletCount: trackedWallets.size,
-      trackedWallets: Array.from(trackedWallets)
-    });
-  } catch (error) {
-    console.error('Error adding wallet for tracking:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to add wallet for tracking',
-        details: error.message
-      }
-    });
-  }
-}));
-
-app.delete('/api/wallet/track/:address', asyncHandler(async (req, res) => {
-  try {
-    const { address } = req.params;
-    
-    if (!address) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          message: 'Wallet address is required'
-        }
-      });
-    }
-    
-    // Remove from tracked wallets
-    const wasTracked = trackedWallets.has(address);
-    trackedWallets.delete(address);
-    
-    // If this was the main distribution wallet, set a new one if available
-    if (address === DISTRIBUTION_WALLET_ADDRESS) {
-      const remainingWallets = Array.from(trackedWallets);
-      if (remainingWallets.length > 0) {
-        DISTRIBUTION_WALLET_ADDRESS = remainingWallets[0];
-        console.log(`Set new main distribution wallet to: ${DISTRIBUTION_WALLET_ADDRESS}`);
-      } else {
-        DISTRIBUTION_WALLET_ADDRESS = null;
-        console.log('No main distribution wallet set');
-      }
-    }
-    
-    console.log(`Removed wallet from tracking: ${address}`);
-    console.log(`Currently tracking ${trackedWallets.size} wallets`);
-    
-    res.json({
-      success: true,
-      message: wasTracked ? 'Wallet removed from tracking' : 'Wallet was not being tracked',
-      walletAddress: address,
-      currentMainWallet: DISTRIBUTION_WALLET_ADDRESS,
-      trackedWalletCount: trackedWallets.size,
-      trackedWallets: Array.from(trackedWallets)
-    });
-  } catch (error) {
-    console.error('Error removing wallet from tracking:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to remove wallet from tracking',
-        details: error.message
-      }
-    });
-  }
-}));
-
-app.get('/api/wallet/tracked', asyncHandler(async (req, res) => {
-  try {
-    res.json({
-      success: true,
-      mainWallet: DISTRIBUTION_WALLET_ADDRESS,
-      trackedWalletCount: trackedWallets.size,
-      trackedWallets: Array.from(trackedWallets)
-    });
-  } catch (error) {
-    console.error('Error getting tracked wallets:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to get tracked wallets',
-        details: error.message
-      }
-    });
-  }
-}));
-
-// Add a comprehensive test endpoint
-app.get('/api/test-all', asyncHandler(async (req, res) => {
-  console.log('Running comprehensive system test...');
-  
-  try {
-    const testResults = {
-      timestamp: new Date().toISOString(),
-      tests: {}
-    };
-    
-    // Test 1: Configuration
-    testResults.tests.configuration = {
-      heliusApiKey: !!HELIUS_API_KEY,
-      heliusRpcUrl: !!HELIUS_RPC_URL,
-      distributionWalletAddress: !!DISTRIBUTION_WALLET_ADDRESS,
-      taxTokenMintAddress: !!TAX_TOKEN_MINT_ADDRESS,
-      trackedWalletCount: trackedWallets.size,
-      maxStoredTransactions: STORAGE_CONFIG.maxStoredTransactions,
-      maxTransactionsToFetch: CONFIG.transactions.maxTransactionsToFetch,
-      backgroundJobsEnabled: CONFIG.backgroundJobs.enabled,
-      autoFetchInterval: CONFIG.backgroundJobs.autoFetchInterval
-    };
-    
-    // Test 2: Storage
-    const initialTransactionCount = transactions.length;
-    testResults.tests.storage = {
-      initialTransactionCount,
-      inMemoryStorageWorking: Array.isArray(transactions)
-    };
-    
-    // Test 3: Transaction fetching
-    console.log('Testing transaction fetching...');
-    const fetchStartTime = Date.now();
-    const fetchedTransactions = await fetchTransactionsVercel(5); // Fetch just 5 for testing
-    const fetchDuration = Date.now() - fetchStartTime;
-    
-    testResults.tests.transactionFetching = {
-      fetchedCount: fetchedTransactions.length,
-      fetchDurationMs: fetchDuration,
-      fetchSuccessful: fetchedTransactions.length > 0,
-      fetchLimitWorking: fetchedTransactions.length <= 5,
-      sampleTransaction: fetchedTransactions.length > 0 ? {
-        signature: fetchedTransactions[0].signature,
-        blockTime: fetchedTransactions[0].blockTime,
-        type: fetchedTransactions[0].type
-      } : null
-    };
-    
-    // Test 4: Background job status
-    testResults.tests.backgroundJobs = {
-      enabled: CONFIG.backgroundJobs.enabled,
-      isRunning: backgroundJobState.isRunning,
-      lastRunTime: backgroundJobState.lastRunTime,
-      consecutiveErrors: backgroundJobState.consecutiveErrors,
-      currentInterval: backgroundJobState.currentInterval
-    };
-    
-    // Test 5: Refresh functionality
-    console.log('Testing refresh functionality...');
-    const preRefreshCount = transactions.length;
-    
-    // Clear transactions
-    transactions.length = 0;
-    
-    // Fetch a small batch
-    const refreshedTransactions = await fetchTransactionsVercel(3);
-    const postRefreshCount = transactions.length;
-    
-    testResults.tests.refreshFunctionality = {
-      preRefreshCount,
-      postRefreshCount,
-      clearingWorked: preRefreshCount > 0 && postRefreshCount < preRefreshCount,
-      fetchAfterClearWorked: postRefreshCount > 0
-    };
-    
-    // Restore original transactions if needed
-    if (preRefreshCount > 0 && postRefreshCount < preRefreshCount) {
-      console.log('Restoring original transaction count...');
-      await fetchTransactionsVercel(10);
-    }
-    
-    // Return all test results
-    res.json({
-      success: true,
-      message: 'Comprehensive system test completed',
-      testResults
-    });
-  } catch (error) {
-    console.error('Error in comprehensive test:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Comprehensive test failed',
-        details: error.message
-      }
-    });
-  }
-}));
-
-// Add a function to fetch transactions for a specific wallet
-async function fetchTransactionsForWallet(walletAddress, limit = 10) {
-  try {
-    console.log(`Fetching transactions for wallet: ${walletAddress} (limit: ${limit})...`);
-    
-    if (!HELIUS_API_KEY || !HELIUS_RPC_URL) {
-      console.error('Missing required environment variables for Helius service');
-      return [];
-    }
-    
-    // Prepare request data
-    const requestData = {
-      jsonrpc: '2.0',
-      id: 'my-id',
-      method: 'getSignaturesForAddress',
-      params: [
-        walletAddress,
-        {
-          limit: limit,
-          before: null, // Fetch from the most recent
-          until: null   // No end point
-        }
-      ]
-    };
-    
-    // Add retry logic for rate limiting
-    let retryCount = 0;
-    let success = false;
-    let response;
-    
-    while (!success && retryCount < 5) {
-      try {
-        // Make direct request to Helius API with proper headers
-        response = await axios.post(HELIUS_RPC_URL, requestData, {
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': HELIUS_API_KEY
-          },
-          timeout: 10000 // 10 second timeout
-        });
-        
-        success = true;
-      } catch (error) {
-        retryCount++;
-        console.error(`Error fetching transactions for wallet (attempt ${retryCount}/5):`, error.message);
-        
-        if (retryCount < 5) {
-          // Exponential backoff
-          const backoffTime = Math.pow(2, retryCount) * 1000;
-          console.log(`Retrying in ${backoffTime / 1000} seconds...`);
-          await new Promise(resolve => setTimeout(resolve, backoffTime));
-        } else {
-          console.error('Max retries reached, giving up');
-          return [];
-        }
-      }
-    }
-    
-    // Check if response is valid
-    if (!response || !response.data || !response.data.result) {
-      console.error('Invalid response from Helius API:', response?.data);
-      return [];
-    }
-    
-    // Get signatures from response
-    const signatures = response.data.result;
-    console.log(`Got ${signatures.length} signatures for wallet ${walletAddress}`);
-    
-    // Process each signature to get transaction details
-    const newTransactions = [];
-    
-    for (const item of signatures) {
-      try {
-        // Check if we already have this transaction
-        const existingTransaction = transactions.find(t => t.signature === item.signature);
-        if (existingTransaction) {
-          console.log(`Transaction ${item.signature} already exists, skipping`);
-          continue;
-        }
-        
-        // Get transaction details
-        const txData = await getTransactionDetails(item.signature);
-        
-        if (txData) {
-          newTransactions.push(txData);
-        }
-      } catch (error) {
-        console.error(`Error processing transaction ${item.signature}:`, error.message);
-      }
-    }
-    
-    console.log(`Processed ${newTransactions.length} new transactions for wallet ${walletAddress}`);
-    return newTransactions;
-  } catch (error) {
-    console.error(`Error fetching transactions for wallet ${walletAddress}:`, error);
-    return [];
-  }
-}
-
-// Add a simple HTML form for users to enter their wallet
-app.get('/track-wallet', (req, res) => {
-  const html = `
-  <!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Track Your Wallet</title>
-    <style>
-      body {
-        font-family: Arial, sans-serif;
-        line-height: 1.6;
-        margin: 0 auto;
-        padding: 20px;
-        color: #333;
-        max-width: 800px;
-        background-color: #f5f5f5;
-      }
-      h1 {
-        color: #2c3e50;
-        text-align: center;
-        margin-bottom: 30px;
-      }
-      .container {
-        background-color: white;
-        padding: 30px;
-        border-radius: 8px;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-      }
-      .form-group {
-        margin-bottom: 20px;
-      }
-      label {
-        display: block;
-        margin-bottom: 8px;
-        font-weight: bold;
-      }
-      input[type="text"] {
-        width: 100%;
-        padding: 10px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        font-size: 16px;
-      }
-      button {
-        background-color: #3498db;
-        color: white;
-        border: none;
-        padding: 12px 20px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 16px;
-        display: block;
-        width: 100%;
-      }
-      button:hover {
-        background-color: #2980b9;
-      }
-      .result {
-        margin-top: 20px;
-        padding: 15px;
-        border-radius: 4px;
-        display: none;
-      }
-      .success {
-        background-color: #d4edda;
-        color: #155724;
-        border: 1px solid #c3e6cb;
-      }
-      .error {
-        background-color: #f8d7da;
-        color: #721c24;
-        border: 1px solid #f5c6cb;
-      }
-      .info {
-        background-color: #e2f0fb;
-        color: #0c5460;
-        border: 1px solid #bee5eb;
-      }
-      .tracked-wallets {
-        margin-top: 30px;
-      }
-      .wallet-item {
-        background-color: #f8f9fa;
-        padding: 10px 15px;
-        margin-bottom: 10px;
-        border-radius: 4px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      .remove-btn {
-        background-color: #dc3545;
-        color: white;
-        border: none;
-        padding: 5px 10px;
-        border-radius: 4px;
-        cursor: pointer;
-      }
-      .remove-btn:hover {
-        background-color: #c82333;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <h1>Track Your Solana Wallet</h1>
-      <p>Enter your Solana wallet address below to track rewards and distributions.</p>
-      
-      <div class="form-group">
-        <label for="walletAddress">Solana Wallet Address:</label>
-        <input type="text" id="walletAddress" name="walletAddress" placeholder="Enter your Solana wallet address" required>
-      </div>
-      
-      <button id="trackWalletBtn">Track Wallet</button>
-      
-      <div id="result" class="result"></div>
-      
-      <div class="tracked-wallets">
-        <h2>Your Tracked Wallets</h2>
-        <div id="walletsList"></div>
-      </div>
-    </div>
-    
-    <script>
-      document.addEventListener('DOMContentLoaded', function() {
-        // Load tracked wallets when page loads
-        fetchTrackedWallets();
-        
-        // Handle form submission
-        document.getElementById('trackWalletBtn').addEventListener('click', function() {
-          const walletAddress = document.getElementById('walletAddress').value.trim();
-          
-          if (!walletAddress) {
-            showResult('Please enter a wallet address', 'error');
-            return;
-          }
-          
-          // Validate Solana wallet address format (base58, 32-44 chars)
-          if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(walletAddress)) {
-            showResult('Invalid Solana wallet address format', 'error');
-            return;
-          }
-          
-          // Send request to track wallet
-          fetch('/api/wallet/track', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ walletAddress })
-          })
-          .then(response => response.json())
-          .then(data => {
-            if (data.success) {
-              showResult('Wallet successfully tracked!', 'success');
-              document.getElementById('walletAddress').value = '';
-              fetchTrackedWallets(); // Refresh the list
-            } else {
-              showResult('Error: ' + (data.error?.message || 'Unknown error'), 'error');
-            }
-          })
-          .catch(error => {
-            showResult('Error: ' + error.message, 'error');
-          });
-        });
-        
-        function showResult(message, type) {
-          const resultElement = document.getElementById('result');
-          resultElement.textContent = message;
-          resultElement.className = 'result ' + type;
-          resultElement.style.display = 'block';
-        }
-        
-        function fetchTrackedWallets() {
-          fetch('/api/wallet/tracked')
-          .then(response => response.json())
-          .then(data => {
-            const walletsList = document.getElementById('walletsList');
-            walletsList.innerHTML = '';
-            
-            if (data.success && data.wallets && data.wallets.length > 0) {
-              data.wallets.forEach(wallet => {
-                const walletItem = document.createElement('div');
-                walletItem.className = 'wallet-item';
-                
-                const walletText = document.createElement('span');
-                walletText.textContent = wallet;
-                walletItem.appendChild(walletText);
-                
-                const removeBtn = document.createElement('button');
-                removeBtn.className = 'remove-btn';
-                removeBtn.textContent = 'Remove';
-                removeBtn.onclick = function() {
-                  removeWallet(wallet);
-                };
-                walletItem.appendChild(removeBtn);
-                
-                walletsList.appendChild(walletItem);
-              });
-            } else {
-              walletsList.innerHTML = '<p>No wallets currently tracked. Add one above.</p>';
-            }
-          })
-          .catch(error => {
-            console.error('Error fetching tracked wallets:', error);
-          });
-        }
-        
-        function removeWallet(walletAddress) {
-          fetch('/api/wallet/track/' + walletAddress, {
-            method: 'DELETE'
-          })
-          .then(response => response.json())
-          .then(data => {
-            if (data.success) {
-              showResult('Wallet removed from tracking', 'info');
-              fetchTrackedWallets(); // Refresh the list
-            } else {
-              showResult('Error removing wallet: ' + (data.error?.message || 'Unknown error'), 'error');
-            }
-          })
-          .catch(error => {
-            showResult('Error: ' + error.message, 'error');
-          });
-        }
-      });
-    </script>
-  </body>
-  </html>
-  `;
-  
-  res.send(html);
-});
-
-// Initialize the app is already called earlier in the file
-// initializeApp();
-
-// Export for Vercel serverless deployment
-module.exports = app; 

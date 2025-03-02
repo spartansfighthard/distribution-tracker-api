@@ -4,9 +4,17 @@
     {
       "src": "api/index.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "api/force-refresh.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
+    {
+      "src": "/api/force-refresh",
+      "dest": "/api/force-refresh.js"
+    },
     {
       "src": "/(.*)",
       "dest": "/api/index.js"

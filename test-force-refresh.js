@@ -1,4 +1,3 @@
-// This script adds the force-refresh endpoint to the main API
 const express = require('express');
 const app = express();
 const port = 3002;
@@ -19,7 +18,4 @@ app.get('/api/force-refresh', async (req, res) => {
 // Start the server
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
-});
-
-// Export the app
-module.exports = app; 
+}); 

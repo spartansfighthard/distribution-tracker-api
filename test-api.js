@@ -1,46 +1,44 @@
 const axios = require('axios');
 
 // Configuration
-const API_URL = 'http://localhost:3002';
+const API_BASE_URL = 'http://localhost:3000'; // For most endpoints
+const FORCE_REFRESH_URL = 'http://localhost:3002'; // For force-refresh endpoint
 
-// Test the root endpoint
-async function testRoot() {
+// Test endpoints
+async function testEndpoints() {
   try {
+    // Test root endpoint
     console.log('Testing root endpoint...');
-    const response = await axios.get(API_URL);
-    console.log('Root Response:', response.data);
-    return response.data;
+    const rootResponse = await axios.get(API_BASE_URL);
+    console.log('Root endpoint response:', rootResponse.data);
+    console.log('-----------------------------------');
+
+    // Test health endpoint
+    console.log('Testing health endpoint...');
+    const healthResponse = await axios.get(`${API_BASE_URL}/api/health`);
+    console.log('Health endpoint response:', healthResponse.data);
+    console.log('-----------------------------------');
+
+    // Test stats endpoint
+    console.log('Testing stats endpoint...');
+    const statsResponse = await axios.get(`${API_BASE_URL}/api/stats`);
+    console.log('Stats endpoint response:', statsResponse.data);
+    console.log('-----------------------------------');
+
+    // Test force-refresh endpoint (on port 3002)
+    console.log('Testing force-refresh endpoint...');
+    const forceRefreshResponse = await axios.get(`${FORCE_REFRESH_URL}/api/force-refresh`);
+    console.log('Force-refresh endpoint response:', forceRefreshResponse.data);
+    console.log('-----------------------------------');
+
   } catch (error) {
-    console.error('Error testing root endpoint:', error.response ? error.response.data : error.message);
-    return null;
+    console.error('Error testing endpoints:', error.message);
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+      console.error('Response status:', error.response.status);
+    }
   }
 }
 
-// Test the force-refresh endpoint
-async function testForceRefresh() {
-  try {
-    console.log('Testing /api/force-refresh endpoint...');
-    const response = await axios.get(`${API_URL}/api/force-refresh`);
-    console.log('Response:', response.data);
-    return response.data;
-  } catch (error) {
-    console.error('Error testing /api/force-refresh:', error.response ? error.response.data : error.message);
-    return null;
-  }
-}
-
-// Main function
-async function main() {
-  try {
-    // Test the root endpoint first
-    await testRoot();
-    
-    // Test the force-refresh endpoint
-    await testForceRefresh();
-  } catch (error) {
-    console.error('Error in main function:', error);
-  }
-}
-
-// Run the main function
-main(); 
+// Run the tests
+testEndpoints(); 
