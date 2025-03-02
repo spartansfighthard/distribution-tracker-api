@@ -206,7 +206,7 @@ global.trackedWallets = trackedWallets;
 global.userWallets = userWallets;
 global.lastNotifiedTimes = lastNotifiedTimes;
 global.getRewardsForWallet = getRewardsForWallet;
-global.storage = storage;
+// We'll set global.storage after the storage object is defined
 
 // Log environment variables for debugging (without exposing sensitive values)
 console.log(`
@@ -475,6 +475,9 @@ const storage = {
     }
   }
 };
+
+// Now make the storage object available globally for the Telegram bot
+global.storage = storage;
 
 // Transaction class
 class Transaction {
