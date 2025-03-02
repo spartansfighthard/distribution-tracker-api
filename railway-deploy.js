@@ -608,7 +608,7 @@ if (!token) {
             `• Stored Transactions: ${storedTx}\n\n` +
             `🔗 *Wallet Information*\n` +
             `• Address: ${safeAddress}\n` +
-            `• [View on Solscan](${stats.solscanLink || `https://solscan.io/account/${address}`})\n\n` +
+            `• [View on Solscan](https://solscan.io/account/${address})\n\n` +
             `🔄 *Last Updated*: ${currentDate}\n\n` +
             `Environment: ${environment} | API Version: ${apiVersion}`;
           
@@ -713,7 +713,7 @@ if (!token) {
               `• Address: ${safeAddress}\n` +
               `• [View on Solscan](https://solscan.io/account/${address})\n\n` +
               `🔄 *Last Updated*: ${currentDate}\n\n` +
-              `💡 Tip: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
+              `💡 Tip: Use \`/balance <wallet_address>\` to check any wallet's balance and rewards.`;
           } else {
             const stats = data.stats;
             const address = process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv';
@@ -734,9 +734,9 @@ if (!token) {
               `• Total Received: ${totalReceived} SOL\n\n` +
               `🔗 *Wallet Details*\n` +
               `• Address: ${safeAddress}\n` +
-              `• [View on Solscan](${stats.solscanLink || `https://solscan.io/account/${address}`})\n\n` +
+              `• [View on Solscan](https://solscan.io/account/${address})\n\n` +
               `🔄 *Last Updated*: ${currentDate}\n\n` +
-              `💡 Tip: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
+              `💡 Tip: Use \`/balance <wallet_address>\` to check any wallet's balance and rewards.`;
           }
           
           await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
