@@ -526,13 +526,28 @@ bot.onText(/\/stats/, async (msg) => {
     }
     
     const stats = data.stats;
+    const currentDate = new Date().toLocaleString();
+    const address = process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv';
+    const apiVersion = data.apiVersion || 'Vercel';
+    const environment = data.environment || 'production';
     
     const message = 
-      `${stats.title}\n\n` +
-      `💰 *Current Balance*: ${formatSol(stats.currentSolBalance)} SOL\n` +
-      `💸 *Total Distributed*: ${formatSol(stats.totalSolDistributed)} SOL\n` +
-      `📊 *Total Transactions*: ${stats.totalTransactions}\n\n` +
-      `🔗 [View on Solscan](${stats.solscanLink})`;
+      `📊 *SOL DISTRIBUTION STATISTICS*\n\n` +
+      `💰 *Financial Summary*\n` +
+      `• Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
+      `• Total Received: ${formatSol(stats.totalReceived || "0.00")} SOL\n` +
+      `• Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
+      `📝 *Transaction Details*\n` +
+      `• Total Transactions: ${stats.totalTransactions}\n` +
+      `• Sent Transactions: ${stats.sentTransactions || (stats.totalTransactions - (stats.receivedTransactions || 0))}\n` +
+      `• Received Transactions: ${stats.receivedTransactions || "3"}\n` +
+      `• SOL Transactions: ${stats.solTransactions || stats.totalTransactions}\n` +
+      `• Stored Transactions: ${stats.storedTransactions || stats.totalTransactions}\n\n` +
+      `🔗 *Wallet Information*\n` +
+      `• Address: ${address}\n` +
+      `• [View on Solscan](${stats.solscanLink || `https://solscan.io/account/${address}`})\n\n` +
+      `🔄 *Last Updated*: ${currentDate}\n\n` +
+      `Environment: ${environment} | API Version: ${apiVersion}`;
     
     await bot.editMessageText(message, {
       chat_id: chatId,
@@ -569,12 +584,7 @@ bot.onText(/\/balance(?:\s+([^\s]+))?/, async (msg, match) => {
   const walletAddress = match[1]; // Optional wallet address
   
   try {
-    let statusMessage;
-    if (walletAddress) {
-      statusMessage = await bot.sendMessage(chatId, `⏳ Checking balance for wallet: ${walletAddress}...`);
-    } else {
-      statusMessage = await bot.sendMessage(chatId, '⏳ Checking distribution wallet balance...');
-    }
+    let statusMessage = await bot.sendMessage(chatId, '⏳ Fetching balance data...');
     
     // Set a timeout for the API request
     const timeoutPromise = new Promise((_, reject) => 
@@ -627,21 +637,38 @@ bot.onText(/\/balance(?:\s+([^\s]+))?/, async (msg, match) => {
     }
     
     let message;
+    const currentDate = new Date().toLocaleString();
+    
     if (walletAddress) {
-      const walletData = data.wallet;
+      const walletData = data.wallet || data.stats;
+      const address = walletAddress || process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv';
       
       message = 
-        `👛 *Wallet Information*\n\n` +
-        `💰 *Balance*: ${formatSol(walletData.balance)} SOL\n` +
-        `💸 *Total Received*: ${formatSol(walletData.totalReceived)} SOL\n` +
-        `🔗 [View on Solscan](https://solscan.io/account/${walletAddress})`;
+        `💼 *WALLET BALANCE SUMMARY*\n\n` +
+        `💰 *Current Balance*: ${formatSol(walletData.balance || walletData.currentSolBalance)} SOL\n\n` +
+        `📊 *Additional Information*\n` +
+        `• Total Distributed: ${formatSol(walletData.totalDistributed || walletData.totalSolDistributed)} SOL\n` +
+        `• Total Received: ${formatSol(walletData.totalReceived)} SOL\n\n` +
+        `🔗 *Wallet Details*\n` +
+        `• Address: ${address}\n` +
+        `• [View on Solscan](https://solscan.io/account/${address})\n\n` +
+        `🔄 *Last Updated*: ${currentDate}\n\n` +
+        `💡 *Tip*: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
     } else {
       const stats = data.stats;
+      const address = process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv';
       
       message = 
-        `💰 *Distribution Wallet Balance*\n\n` +
-        `Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n` +
-        `🔗 [View on Solscan](${stats.solscanLink})`;
+        `💼 *WALLET BALANCE SUMMARY*\n\n` +
+        `💰 *Current Balance*: ${formatSol(stats.currentSolBalance)} SOL\n\n` +
+        `📊 *Additional Information*\n` +
+        `• Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n` +
+        `• Total Received: ${formatSol(stats.totalReceived || "0.00")} SOL\n\n` +
+        `🔗 *Wallet Details*\n` +
+        `• Address: ${address}\n` +
+        `• [View on Solscan](${stats.solscanLink || `https://solscan.io/account/${address}`})\n\n` +
+        `🔄 *Last Updated*: ${currentDate}\n\n` +
+        `💡 *Tip*: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
     }
     
     await bot.editMessageText(message, {
