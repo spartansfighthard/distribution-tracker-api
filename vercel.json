@@ -16,6 +16,14 @@
     {
       "src": "api/stop-collection.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "api/stop-api.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/help.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
@@ -30,6 +38,14 @@
     {
       "src": "/api/admin/stop-collection",
       "dest": "/api/stop-collection.js"
+    },
+    {
+      "src": "/api/admin/stop-api",
+      "dest": "/api/stop-api.js"
+    },
+    {
+      "src": "/api/help",
+      "dest": "/api/help.js"
     },
     {
       "src": "/(.*)",

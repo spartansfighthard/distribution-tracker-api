@@ -9,6 +9,44 @@ const fs = require('fs').promises;
 const path = require('path');
 const nodeSetTimeout = global.setTimeout;
 
+// API Shutdown flag check
+const API_SHUTDOWN_FLAG_FILE = path.join('/tmp', 'api_shutdown_flag.json');
+let isApiShutdown = false;
+
+// Function to check if API is shut down
+async function checkApiShutdown() {
+  try {
+    // Check global variable first
+    if (global.API_SHUTDOWN) {
+      isApiShutdown = true;
+      return true;
+    }
+    
+    // Check for flag file
+    try {
+      const flagData = await fs.readFile(API_SHUTDOWN_FLAG_FILE, 'utf8');
+      const parsedData = JSON.parse(flagData);
+      if (parsedData.shutdown) {
+        isApiShutdown = true;
+        global.API_SHUTDOWN = true;
+        console.log('API shutdown flag detected. API is in maintenance mode.');
+        return true;
+      }
+    } catch (err) {
+      // File doesn't exist or can't be read, API is not shut down
+      if (err.code !== 'ENOENT') {
+        console.error('Error checking API shutdown flag:', err);
+      }
+    }
+    
+    isApiShutdown = false;
+    return false;
+  } catch (error) {
+    console.error('Error in checkApiShutdown:', error);
+    return false;
+  }
+}
+
 // Storage configuration
 const STORAGE_CONFIG = {
   localFilePath: path.join(process.cwd(), 'data', 'transactions.json'),
@@ -189,6 +227,30 @@ const heliusRateLimiter = new RateLimiter(CONFIG.rateLimits.requestsPerSecond);
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Middleware to check for API shutdown
+app.use(async (req, res, next) => {
+  // Skip shutdown check for the stop-api endpoint itself
+  if (req.path === '/api/admin/stop-api') {
+    return next();
+  }
+  
+  // Check if API is shut down
+  await checkApiShutdown();
+  if (isApiShutdown) {
+    return res.status(503).json({
+      success: false,
+      error: {
+        message: 'API is currently in maintenance mode. Please try again later.',
+        code: 503
+      },
+      maintenance: true,
+      timestamp: new Date().toISOString()
+    });
+  }
+  
+  next();
+});
 
 // API Key Authentication Middleware
 function authenticateApiKey(req, res, next) {
