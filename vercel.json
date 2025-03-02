@@ -8,12 +8,20 @@
     {
       "src": "api/force-refresh.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "api/wallet.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/api/force-refresh",
       "dest": "/api/force-refresh.js"
+    },
+    {
+      "src": "/api/wallet",
+      "dest": "/api/wallet.js"
     },
     {
       "src": "/(.*)",
