@@ -211,7 +211,8 @@ if (!token) {
           await callback();
         } else {
           // User is not an admin, send authentication message
-          msg.reply(
+          bot.sendMessage(
+            chatId,
             "⚠️ *Admin Authentication Required*\n\n" +
             "This command requires admin privileges. Please use:\n" +
             "`/admin [password]`\n\n" +
@@ -232,7 +233,8 @@ if (!token) {
           
           // Save the configuration
           if (saveAdminConfig()) {
-            msg.reply(
+            bot.sendMessage(
+              chatId,
               "🎉 *Congratulations!*\n\n" +
               "You have been registered as the bot creator and administrator.\n" +
               "You now have full access to all admin commands.\n\n" +
@@ -240,7 +242,8 @@ if (!token) {
               { parse_mode: 'Markdown' }
             );
           } else {
-            msg.reply(
+            bot.sendMessage(
+              chatId,
               "❌ *Error*\n\n" +
               "Failed to save creator configuration. Please check server logs.",
               { parse_mode: 'Markdown' }
@@ -248,7 +251,8 @@ if (!token) {
           }
         } else {
           // Creator already set
-          msg.reply(
+          bot.sendMessage(
+            chatId,
             "⚠️ *Setup Already Completed*\n\n" +
             "This bot already has a registered creator.\n" +
             "If you need admin access, please contact the bot creator.",
@@ -266,19 +270,19 @@ if (!token) {
         if (password === ADMIN_PASSWORD) {
           // Store admin session for 1 hour
           adminSessions.set(userId, Date.now() + 3600000); // 1 hour expiry
-          msg.reply("✅ Admin authentication successful. Your session will expire in 1 hour.");
+          bot.sendMessage(chatId, "✅ Admin authentication successful. Your session will expire in 1 hour.");
           
           // Set a timeout to clear the session after 1 hour
           setTimeout(() => {
             if (adminSessions.has(userId)) {
               adminSessions.delete(userId);
               // Notify the user if they're still in a chat with the bot
-              msg.reply("⏱️ Your admin session has expired. Please authenticate again if needed.")
+              bot.sendMessage(chatId, "⏱️ Your admin session has expired. Please authenticate again if needed.")
                 .catch(() => {}); // Ignore errors if message can't be sent
             }
           }, 3600000);
         } else {
-          msg.reply("❌ Authentication failed. Incorrect password.");
+          bot.sendMessage(chatId, "❌ Authentication failed. Incorrect password.");
         }
       });
 
@@ -295,15 +299,15 @@ if (!token) {
             
             // Save the updated configuration
             if (saveAdminConfig()) {
-              msg.reply(`✅ User ID ${newAdminId} has been added as an admin.`);
+              bot.sendMessage(chatId, `✅ User ID ${newAdminId} has been added as an admin.`);
             } else {
-              msg.reply("❌ Failed to save admin configuration. The admin was added for this session only.");
+              bot.sendMessage(chatId, "❌ Failed to save admin configuration. The admin was added for this session only.");
             }
           } else {
-            msg.reply(`ℹ️ User ID ${newAdminId} is already an admin.`);
+            bot.sendMessage(chatId, `ℹ️ User ID ${newAdminId} is already an admin.`);
           }
         } else {
-          msg.reply("⚠️ Only the bot creator can add new admins.");
+          bot.sendMessage(chatId, "⚠️ Only the bot creator can add new admins.");
         }
       });
 
@@ -317,7 +321,7 @@ if (!token) {
         if (userId === botCreatorId) {
           // Cannot remove the creator
           if (adminIdToRemove === botCreatorId) {
-            msg.reply("⚠️ You cannot remove the bot creator from admins.");
+            bot.sendMessage(chatId, "⚠️ You cannot remove the bot creator from admins.");
             return;
           }
           
@@ -327,15 +331,15 @@ if (!token) {
             
             // Save the updated configuration
             if (saveAdminConfig()) {
-              msg.reply(`✅ User ID ${adminIdToRemove} has been removed from admins.`);
+              bot.sendMessage(chatId, `✅ User ID ${adminIdToRemove} has been removed from admins.`);
             } else {
-              msg.reply("❌ Failed to save admin configuration. The admin was removed for this session only.");
+              bot.sendMessage(chatId, "❌ Failed to save admin configuration. The admin was removed for this session only.");
             }
           } else {
-            msg.reply(`ℹ️ User ID ${adminIdToRemove} is not an admin.`);
+            bot.sendMessage(chatId, `ℹ️ User ID ${adminIdToRemove} is not an admin.`);
           }
         } else {
-          msg.reply("⚠️ Only the bot creator can remove admins.");
+          bot.sendMessage(chatId, "⚠️ Only the bot creator can remove admins.");
         }
       });
 
@@ -361,7 +365,7 @@ if (!token) {
           
           message += "\nTemporary admin sessions are not listed.";
           
-          msg.reply(message, { parse_mode: 'Markdown' });
+          bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
         });
       });
 
@@ -389,13 +393,13 @@ if (!token) {
         const chatId = msg.chat.id;
         
         requireAdmin(msg, async () => {
-          const statusMessage = await msg.reply("⏳ Forcing refresh of all transactions...");
+          const statusMessage = await bot.sendMessage(chatId, "⏳ Forcing refresh of all transactions...");
           
           try {
             const response = await fetchFromAPI('/api/admin/force-refresh');
             
             if (response.success) {
-              await msg.reply("✅ *Force Refresh Successful*\n\n" + response.message, {
+              await bot.sendMessage(chatId, "✅ *Force Refresh Successful*\n\n" + response.message, {
                 parse_mode: 'Markdown'
               });
             } else {
@@ -404,7 +408,7 @@ if (!token) {
           } catch (error) {
             console.error('Error in force refresh command:', error.message);
             
-            await msg.reply("❌ *Force Refresh Failed*\n\n" + error.message, {
+            await bot.sendMessage(chatId, "❌ *Force Refresh Failed*\n\n" + error.message, {
               parse_mode: 'Markdown'
             });
           }
@@ -416,13 +420,13 @@ if (!token) {
         const chatId = msg.chat.id;
         
         requireAdmin(msg, async () => {
-          const statusMessage = await msg.reply("⏳ Forcing save of all data...");
+          const statusMessage = await bot.sendMessage(chatId, "⏳ Forcing save of all data...");
           
           try {
             const response = await fetchFromAPI('/api/admin/force-save');
             
             if (response.success) {
-              await msg.reply("✅ *Force Save Successful*\n\n" + response.message, {
+              await bot.sendMessage(chatId, "✅ *Force Save Successful*\n\n" + response.message, {
                 parse_mode: 'Markdown'
               });
             } else {
@@ -431,7 +435,7 @@ if (!token) {
           } catch (error) {
             console.error('Error in force save command:', error.message);
             
-            await msg.reply("❌ *Force Save Failed*\n\n" + error.message, {
+            await bot.sendMessage(chatId, "❌ *Force Save Failed*\n\n" + error.message, {
               parse_mode: 'Markdown'
             });
           }
@@ -443,13 +447,13 @@ if (!token) {
         const chatId = msg.chat.id;
         
         requireAdmin(msg, async () => {
-          const statusMessage = await msg.reply("⏳ Fetching all transactions (this may take a while)...");
+          const statusMessage = await bot.sendMessage(chatId, "⏳ Fetching all transactions (this may take a while)...");
           
           try {
             const response = await fetchFromAPI('/api/admin/fetch-all');
             
             if (response.success) {
-              await msg.reply("✅ *Fetch All Successful*\n\n" + response.message, {
+              await bot.sendMessage(chatId, "✅ *Fetch All Successful*\n\n" + response.message, {
                 parse_mode: 'Markdown'
               });
             } else {
@@ -458,7 +462,7 @@ if (!token) {
           } catch (error) {
             console.error('Error in fetch all command:', error.message);
             
-            await msg.reply("❌ *Fetch All Failed*\n\n" + error.message, {
+            await bot.sendMessage(chatId, "❌ *Fetch All Failed*\n\n" + error.message, {
               parse_mode: 'Markdown'
             });
           }
@@ -524,7 +528,7 @@ if (!token) {
         const chatId = msg.chat.id;
         
         try {
-          const statusMessage = await msg.reply('⏳ Fetching statistics...');
+          const statusMessage = await bot.sendMessage(chatId, '⏳ Fetching statistics...');
           
           // Set a timeout for the API request
           const timeoutPromise = new Promise((_, reject) => 
@@ -539,7 +543,7 @@ if (!token) {
             .catch(async (error) => {
               // If the first attempt fails, try with an even smaller limit
               if (error.message.includes('timeout') || error.message.includes('15s limit')) {
-                await msg.reply('⏳ First attempt timed out, trying with minimal data...');
+                await bot.sendMessage(chatId, '⏳ First attempt timed out, trying with minimal data...');
                 
                 // Try with minimal data
                 return fetchFromAPI('/api/stats?limit=1&minimal=true');
@@ -560,7 +564,7 @@ if (!token) {
                 `🔗 [View on Solscan](${stats.solscanLink})\n\n` +
                 `⚠️ Note: Using fallback data due to API issues.`;
               
-              await msg.reply(message, { parse_mode: 'Markdown' });
+              await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
               return;
             }
             
@@ -591,7 +595,7 @@ if (!token) {
             `🔄 *Last Updated*: ${currentDate}\n\n` +
             `Environment: ${environment} | API Version: ${apiVersion}`;
           
-          await msg.reply(message, { parse_mode: 'Markdown' });
+          await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
         } catch (error) {
           console.error('Error fetching stats:', error.message);
           
@@ -612,7 +616,7 @@ if (!token) {
             errorMessage = '❌ Error fetching statistics: ' + error.message;
           }
           
-          msg.reply(errorMessage, { parse_mode: 'Markdown' });
+          bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
         }
       });
 
@@ -622,7 +626,7 @@ if (!token) {
         const walletAddress = match[1]; // Optional wallet address
         
         try {
-          let statusMessage = await msg.reply('⏳ Fetching balance data...');
+          let statusMessage = await bot.sendMessage(chatId, '⏳ Fetching balance data...');
           
           // Set a timeout for the API request
           const timeoutPromise = new Promise((_, reject) => 
@@ -639,7 +643,7 @@ if (!token) {
             .catch(async (error) => {
               // If the first attempt fails, try with an even smaller limit
               if (error.message.includes('timeout') || error.message.includes('15s limit')) {
-                await msg.reply('⏳ First attempt timed out, trying with minimal data...');
+                await bot.sendMessage(chatId, '⏳ First attempt timed out, trying with minimal data...');
                 
                 // Try with minimal data
                 return walletAddress 
@@ -660,7 +664,7 @@ if (!token) {
                 `🔗 [View on Solscan](${stats.solscanLink})\n\n` +
                 `⚠️ Note: Using fallback data due to API issues.`;
               
-              await msg.reply(message, { parse_mode: 'Markdown' });
+              await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
               return;
             }
             
@@ -698,11 +702,11 @@ if (!token) {
               `🔗 *Wallet Details*\n` +
               `• Address: ${address}\n` +
               `• [View on Solscan](${stats.solscanLink || `https://solscan.io/account/${address}`})\n\n` +
-              `�� *Last Updated*: ${currentDate}\n\n` +
+              `🔄 *Last Updated*: ${currentDate}\n\n` +
               `💡 *Tip*: Use /balance <wallet_address> to check any wallet's balance and rewards.`;
           }
           
-          await msg.reply(message, { parse_mode: 'Markdown' });
+          await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
         } catch (error) {
           console.error('Error fetching balance:', error.message);
           
@@ -720,7 +724,7 @@ if (!token) {
             errorMessage = '❌ Error fetching balance: ' + error.message;
           }
           
-          msg.reply(errorMessage, { parse_mode: 'Markdown' });
+          bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
         }
       });
 
@@ -729,7 +733,7 @@ if (!token) {
         const chatId = msg.chat.id;
         
         try {
-          const statusMessage = await msg.reply('⏳ Fetching distributed amount...');
+          const statusMessage = await bot.sendMessage(chatId, '⏳ Fetching distributed amount...');
           
           // Set a timeout for the API request
           const timeoutPromise = new Promise((_, reject) => 
@@ -744,7 +748,7 @@ if (!token) {
             .catch(async (error) => {
               // If the first attempt fails, try with minimal data
               if (error.message.includes('timeout') || error.message.includes('15s limit')) {
-                await msg.reply('⏳ First attempt timed out, trying with minimal data...');
+                await bot.sendMessage(chatId, '⏳ First attempt timed out, trying with minimal data...');
                 
                 // Try with minimal data
                 return fetchFromAPI('/api/stats?limit=1&minimal=true');
@@ -762,7 +766,7 @@ if (!token) {
                 `Total Distributed: ${formatSol(stats.totalSolDistributed)} SOL\n\n` +
                 `⚠️ Note: Using fallback data due to API issues.`;
               
-              await msg.reply(message, { parse_mode: 'Markdown' });
+              await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
               return;
             }
             
@@ -784,7 +788,7 @@ if (!token) {
             `• Total Received: ${formatSol(stats.totalReceived || "0.00")} SOL\n\n` +
             `🔄 *Last Updated*: ${currentDate}`;
           
-          await msg.reply(message, { parse_mode: 'Markdown' });
+          await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
         } catch (error) {
           console.error('Error fetching distributed amount:', error.message);
           
@@ -801,7 +805,7 @@ if (!token) {
             errorMessage = '❌ Error fetching distributed amount: ' + error.message;
           }
           
-          msg.reply(errorMessage, { parse_mode: 'Markdown' });
+          bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
         }
       });
 
@@ -810,7 +814,7 @@ if (!token) {
         const chatId = msg.chat.id;
         
         try {
-          const statusMessage = await msg.reply('⏳ Fetching recent transactions...');
+          const statusMessage = await bot.sendMessage(chatId, '⏳ Fetching recent transactions...');
           
           // Set a timeout for the API request
           const timeoutPromise = new Promise((_, reject) => 
@@ -825,7 +829,7 @@ if (!token) {
             .catch(async (error) => {
               // If the first attempt fails, try with minimal data
               if (error.message.includes('timeout') || error.message.includes('15s limit')) {
-                await msg.reply('⏳ First attempt timed out, trying with minimal data...');
+                await bot.sendMessage(chatId, '⏳ First attempt timed out, trying with minimal data...');
                 
                 // Try with minimal data
                 return fetchFromAPI('/api/transactions?limit=3&minimal=true');
@@ -841,7 +845,7 @@ if (!token) {
           const currentDate = new Date().toLocaleString();
           
           if (transactions.length === 0) {
-            await msg.reply('📝 *No Transactions Found*\n\nNo recent transactions were found in the database.', { parse_mode: 'Markdown' });
+            await bot.sendMessage(chatId, '📝 *No Transactions Found*\n\nNo recent transactions were found in the database.', { parse_mode: 'Markdown' });
             return;
           }
           
@@ -864,7 +868,7 @@ if (!token) {
           message += `🔄 *Last Updated*: ${currentDate}\n\n`;
           message += `Total Transactions: ${data.transactions?.totalStoredTransactions || transactions.length}`;
           
-          await msg.reply(message, { parse_mode: 'Markdown' });
+          await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
         } catch (error) {
           console.error('Error fetching transactions:', error.message);
           
@@ -881,7 +885,7 @@ if (!token) {
             errorMessage = '❌ Error fetching transactions: ' + error.message;
           }
           
-          msg.reply(errorMessage, { parse_mode: 'Markdown' });
+          bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
         }
       });
 
@@ -901,12 +905,13 @@ if (!token) {
           "/transactions - View recent transactions\n" +
           "/help - Show this help message";
         
-        msg.reply(message);
+        bot.sendMessage(chatId, message);
         
         // If this is first run and no creator is set, suggest setup
         if (isFirstRun && botCreatorId === null) {
           setTimeout(() => {
-            msg.reply(
+            bot.sendMessage(
+              chatId,
               "🔧 *First Run Setup*\n\n" +
               "It looks like this is the first run of the bot and no creator has been set.\n\n" +
               "If you are the bot creator, please run:\n" +
