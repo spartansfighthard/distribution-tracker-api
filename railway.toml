@@ -4,5 +4,7 @@ builder = "nixpacks"
 [deploy]
 startCommand = "node railway-deploy.js"
 numReplicas = 1
-healthcheckPath = "/"
-healthcheckTimeout = 100 
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "on-failure"
+restartPolicyMaxRetries = 5 

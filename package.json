@@ -2,10 +2,10 @@
   "name": "sol-distribution-tracker-bot",
   "version": "1.0.0",
   "description": "Telegram bot for SOL Distribution Tracker",
-  "main": "telegram-bot.js",
+  "main": "railway-deploy.js",
   "scripts": {
-    "start": "node telegram-bot.js",
-    "dev": "nodemon telegram-bot.js"
+    "start": "node railway-deploy.js",
+    "dev": "nodemon railway-deploy.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

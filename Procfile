@@ -1,1 +1,1 @@
-web: node telegram-bot.js 
+web: node railway-deploy.js 

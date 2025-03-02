@@ -1,3 +1,99 @@
+// Telegram Bot for SOL Distribution Tracker - Railway Deployment
+// This script is the entry point for Railway deployment
+
+require('dotenv').config({ path: '.env.bot' });
+const TelegramBot = require('node-telegram-bot-api');
+const fetch = require('node-fetch');
+const express = require('express');
+
+// Create Express app for health checks
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// API base URL - can be overridden by Railway environment variables
+const API_BASE_URL = process.env.API_BASE_URL || 'https://distribution-tracker-api.vercel.app';
+
+// Telegram bot token
+const token = process.env.TELEGRAM_BOT_TOKEN;
+
+if (!token) {
+  console.error('TELEGRAM_BOT_TOKEN is not defined in environment variables');
+  process.exit(1);
+}
+
+// Add instance ID for logging
+const instanceId = Date.now().toString();
+console.log(`Starting bot instance with ID: ${instanceId} on Railway`);
+console.log(`Using API: ${API_BASE_URL}`);
+
+// Create a bot instance with proper error handling
+const bot = new TelegramBot(token, { 
+  polling: {
+    params: {
+      timeout: 30,
+      allowed_updates: ["message", "callback_query"]
+    }
+  }
+});
+
+// Handle polling errors
+bot.on('polling_error', (error) => {
+  console.log(`Polling error: ${error.message}`);
+  
+  // If we detect another instance is running, exit gracefully
+  if (error.message && error.message.includes('terminated by other getUpdates request')) {
+    console.log('Another bot instance is already running. This instance will exit.');
+    process.exit(0);
+  }
+});
+
+// Helper function to format SOL amounts
+function formatSol(lamports) {
+  // Handle string inputs (API returns strings)
+  if (typeof lamports === 'string') {
+    // Convert directly if it's already in SOL format (small decimal)
+    if (lamports.includes('.')) {
+      const solValue = parseFloat(lamports);
+      return solValue.toLocaleString('en-US', { 
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 9 
+      });
+    }
+    // Convert from lamports if it's a large integer string
+    lamports = parseInt(lamports, 10);
+  }
+  
+  // Convert from lamports to SOL
+  const solValue = lamports / 1000000000;
+  return solValue.toLocaleString('en-US', { 
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 9 
+  });
+}
+
+// Helper function to fetch data from API with error handling
+async function fetchFromAPI(endpoint) {
+  const url = `${API_BASE_URL}${endpoint}`;
+  const apiKey = process.env.API_KEY;
+  
+  try {
+    const headers = apiKey ? { 'X-API-KEY': apiKey } : {};
+    const response = await fetch(url, { headers });
+    
+    if (!response.ok) {
+      throw new Error(`API responded with status ${response.status}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error(`Error fetching from API (${url}):`, error.message);
+    return { 
+      success: false, 
+      error: { message: error.message } 
+    };
+  }
+}
+
 // Simplified stats command with better error handling and timeout management
 bot.onText(/\/stats/, async (msg) => {
   const chatId = msg.chat.id;
@@ -150,4 +246,51 @@ bot.onText(/\/balance(?:\s+([^\s]+))?/, async (msg, match) => {
     
     bot.sendMessage(chatId, errorMessage);
   }
-}); 
+});
+
+// Start command
+bot.onText(/\/start/, (msg) => {
+  const chatId = msg.chat.id;
+  const message = 
+    "👋 Welcome to the SOL Distribution Tracker Bot!\n\n" +
+    "This bot allows you to check statistics about SOL distributions.\n\n" +
+    "Available commands:\n" +
+    "/stats - View distribution statistics\n" +
+    "/balance - Check distribution wallet balance\n" +
+    "/balance [address] - Check any wallet's balance\n" +
+    "/help - Show this help message";
+  
+  bot.sendMessage(chatId, message);
+});
+
+// Help command
+bot.onText(/\/help/, (msg) => {
+  const chatId = msg.chat.id;
+  const message = 
+    "📚 *SOL Distribution Tracker Bot Help*\n\n" +
+    "Available commands:\n\n" +
+    "*/stats* - View distribution statistics\n" +
+    "*/balance* - Check distribution wallet balance\n" +
+    "*/balance [address]* - Check any wallet's balance\n" +
+    "*/help* - Show this help message\n\n" +
+    "For any issues, please contact the administrator.";
+  
+  bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
+
+// Set up Express routes for health checks
+app.get('/', (req, res) => {
+  res.send(`Bot is running! Instance ID: ${instanceId}`);
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', instance: instanceId });
+});
+
+// Start Express server
+app.listen(PORT, () => {
+  console.log(`Health check server running on port ${PORT}`);
+});
+
+// Log startup
+console.log('Bot started successfully!'); 
