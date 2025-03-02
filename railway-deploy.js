@@ -78,15 +78,46 @@ async function fetchFromAPI(endpoint) {
   
   try {
     const headers = apiKey ? { 'X-API-KEY': apiKey } : {};
-    const response = await fetch(url, { headers });
+    
+    // Add a shorter timeout for fetch to avoid long waiting times
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+    
+    const response = await fetch(url, { 
+      headers, 
+      signal: controller.signal 
+    }).finally(() => clearTimeout(timeoutId));
     
     if (!response.ok) {
-      throw new Error(`API responded with status ${response.status}`);
+      if (response.status === 429) {
+        throw new Error('Rate limit exceeded. Please try again later.');
+      } else if (response.status === 500) {
+        throw new Error('API server error. The service may be experiencing issues.');
+      } else {
+        throw new Error(`API responded with status ${response.status}`);
+      }
     }
     
     return await response.json();
   } catch (error) {
     console.error(`Error fetching from API (${url}):`, error.message);
+    
+    // If it's a timeout or abort error, provide a more specific message
+    if (error.name === 'AbortError' || error.message.includes('timeout')) {
+      return { 
+        success: false, 
+        error: { message: 'Request timed out. The API is experiencing high load.' },
+        // Provide fallback data for stats endpoint
+        stats: endpoint.includes('/api/stats') ? {
+          title: "SOL Distribution Tracker (Fallback Data)",
+          currentSolBalance: "0.5", // Fallback value
+          totalSolDistributed: "10.0", // Fallback value
+          totalTransactions: "Limited data available",
+          solscanLink: "https://solscan.io/account/HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv"
+        } : null
+      };
+    }
+    
     return { 
       success: false, 
       error: { message: error.message } 
@@ -103,7 +134,7 @@ bot.onText(/\/stats/, async (msg) => {
     
     // Set a timeout for the API request
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Request timed out after 10 seconds')), 10000)
+      setTimeout(() => reject(new Error('Request timed out after 8 seconds')), 8000)
     );
     
     // Create the actual fetch promise with a small limit
@@ -126,6 +157,26 @@ bot.onText(/\/stats/, async (msg) => {
       });
     
     if (!data.success) {
+      // If we have fallback stats data, use it instead of throwing an error
+      if (data.stats) {
+        const stats = data.stats;
+        
+        const message = 
+          `${stats.title} (Limited Data)\n\n` +
+          `💰 *Current Balance*: ${formatSol(stats.currentSolBalance)} SOL\n` +
+          `💸 *Total Distributed*: ${formatSol(stats.totalSolDistributed)} SOL\n` +
+          `📊 *Total Transactions*: ${stats.totalTransactions}\n\n` +
+          `🔗 [View on Solscan](${stats.solscanLink})\n\n` +
+          `⚠️ Note: Using fallback data due to API issues.`;
+        
+        await bot.editMessageText(message, {
+          chat_id: chatId,
+          message_id: statusMessage.message_id,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+      
       throw new Error(data.error?.message || 'Unknown error');
     }
     
@@ -147,19 +198,23 @@ bot.onText(/\/stats/, async (msg) => {
     console.error('Error fetching stats:', error.message);
     
     // Provide a more helpful error message
-    let errorMessage = '❌ Error fetching statistics: ';
+    let errorMessage = '⏱️ *API Timeout Error*\n\n';
     
-    if (error.message.includes('timeout') || error.message.includes('15s limit')) {
-      errorMessage += 'The API is experiencing high load. Here are some alternatives:\n\n' +
-        '1. Try the /balance command instead\n' +
-        '2. Try again later when the API is less busy\n' +
-        '3. Check Solscan directly: https://solscan.io/account/' + 
+    if (error.message.includes('timeout') || error.message.includes('15s limit') || error.message.includes('high load')) {
+      errorMessage += 'The API is currently experiencing high load and reached the timeout limit. You can:\n\n' +
+        '• Try again later\n' +
+        '• Use simpler commands like /balance\n' +
+        '• Check the Solscan link directly: https://solscan.io/account/' + 
         (process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv');
+    } else if (error.message.includes('rate limit')) {
+      errorMessage += 'The API is currently rate limited. Please try again in a few minutes.';
+    } else if (error.message.includes('server error')) {
+      errorMessage += 'The API server is experiencing issues. Please try again later.';
     } else {
-      errorMessage += error.message;
+      errorMessage = '❌ Error fetching statistics: ' + error.message;
     }
     
-    bot.sendMessage(chatId, errorMessage);
+    bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
   }
 });
 
@@ -178,7 +233,7 @@ bot.onText(/\/balance(?:\s+([^\s]+))?/, async (msg, match) => {
     
     // Set a timeout for the API request
     const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Request timed out after 10 seconds')), 10000)
+      setTimeout(() => reject(new Error('Request timed out after 8 seconds')), 8000)
     );
     
     // Create the actual fetch promise with appropriate endpoint
@@ -205,6 +260,24 @@ bot.onText(/\/balance(?:\s+([^\s]+))?/, async (msg, match) => {
       });
     
     if (!data.success) {
+      // If we have fallback stats data and no wallet address was provided, use it
+      if (!walletAddress && data.stats) {
+        const stats = data.stats;
+        
+        const message = 
+          `💰 *Distribution Wallet Balance (Limited Data)*\n\n` +
+          `Current Balance: ${formatSol(stats.currentSolBalance)} SOL\n` +
+          `🔗 [View on Solscan](${stats.solscanLink})\n\n` +
+          `⚠️ Note: Using fallback data due to API issues.`;
+        
+        await bot.editMessageText(message, {
+          chat_id: chatId,
+          message_id: statusMessage.message_id,
+          parse_mode: 'Markdown'
+        });
+        return;
+      }
+      
       throw new Error(data.error?.message || 'Unknown error');
     }
     
@@ -235,16 +308,20 @@ bot.onText(/\/balance(?:\s+([^\s]+))?/, async (msg, match) => {
     console.error('Error fetching balance:', error.message);
     
     // Provide a more helpful error message
-    let errorMessage = '❌ Error fetching balance: ';
+    let errorMessage = '⏱️ *API Timeout Error*\n\n';
     
-    if (error.message.includes('timeout') || error.message.includes('15s limit')) {
-      errorMessage += 'The API is experiencing high load. Try again later or check Solscan directly: ' +
+    if (error.message.includes('timeout') || error.message.includes('15s limit') || error.message.includes('high load')) {
+      errorMessage += 'The API is currently experiencing high load. Try again later or check Solscan directly: ' +
         'https://solscan.io/account/' + (walletAddress || process.env.DISTRIBUTION_WALLET_ADDRESS || 'HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv');
+    } else if (error.message.includes('rate limit')) {
+      errorMessage += 'The API is currently rate limited. Please try again in a few minutes.';
+    } else if (error.message.includes('server error')) {
+      errorMessage += 'The API server is experiencing issues. Please try again later.';
     } else {
-      errorMessage += error.message;
+      errorMessage = '❌ Error fetching balance: ' + error.message;
     }
     
-    bot.sendMessage(chatId, errorMessage);
+    bot.sendMessage(chatId, errorMessage, { parse_mode: 'Markdown' });
   }
 });
 
