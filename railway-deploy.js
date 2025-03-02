@@ -21,6 +21,11 @@ if (!token) {
   process.exit(1);
 }
 
+// Admin configuration
+const ADMIN_USER_IDS = process.env.ADMIN_USER_IDS ? process.env.ADMIN_USER_IDS.split(',').map(id => parseInt(id.trim())) : [];
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123'; // Default password if not set
+const adminSessions = new Map(); // Store authenticated admin sessions
+
 // Add instance ID for logging
 const instanceId = Date.now().toString();
 console.log(`Starting bot instance with ID: ${instanceId} on Railway`);
@@ -70,6 +75,166 @@ function formatSol(lamports) {
     maximumFractionDigits: 9 
   });
 }
+
+// Helper function to check if a user is an admin
+function isAdmin(userId) {
+  // Check if user is in the admin list or has an active admin session
+  return ADMIN_USER_IDS.includes(userId) || adminSessions.has(userId);
+}
+
+// Helper function to require admin privileges for a command
+async function requireAdmin(msg, callback) {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  
+  if (isAdmin(userId)) {
+    // User is already an admin, execute the callback
+    await callback();
+  } else {
+    // User is not an admin, send authentication message
+    bot.sendMessage(chatId, 
+      "⚠️ *Admin Authentication Required*\n\n" +
+      "This command requires admin privileges. Please use:\n" +
+      "`/admin [password]`\n\n" +
+      "If you are not an admin, you cannot use this command.",
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+
+// Admin authentication command
+bot.onText(/\/admin (.+)/, (msg, match) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  const password = match[1];
+  
+  if (password === ADMIN_PASSWORD) {
+    // Store admin session for 1 hour
+    adminSessions.set(userId, Date.now() + 3600000); // 1 hour expiry
+    bot.sendMessage(chatId, "✅ Admin authentication successful. Your session will expire in 1 hour.");
+    
+    // Set a timeout to clear the session after 1 hour
+    setTimeout(() => {
+      if (adminSessions.has(userId)) {
+        adminSessions.delete(userId);
+        // Notify the user if they're still in a chat with the bot
+        bot.sendMessage(chatId, "⏱️ Your admin session has expired. Please authenticate again if needed.")
+          .catch(() => {}); // Ignore errors if message can't be sent
+      }
+    }, 3600000);
+  } else {
+    bot.sendMessage(chatId, "❌ Authentication failed. Incorrect password.");
+  }
+});
+
+// Stop command (admin only)
+bot.onText(/\/stop/, (msg) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  
+  requireAdmin(msg, async () => {
+    await bot.sendMessage(chatId, "🛑 *Bot Shutdown Initiated*\n\nThe bot is shutting down. It will be restarted automatically by the deployment platform.", { parse_mode: 'Markdown' });
+    console.log(`Bot shutdown initiated by admin (User ID: ${userId})`);
+    
+    // Give time for the message to be sent before exiting
+    setTimeout(() => {
+      process.exit(0);
+    }, 1000);
+  });
+});
+
+// Force refresh command (admin only)
+bot.onText(/\/force_refresh/, (msg) => {
+  const chatId = msg.chat.id;
+  
+  requireAdmin(msg, async () => {
+    const statusMessage = await bot.sendMessage(chatId, "⏳ Forcing refresh of all transactions...");
+    
+    try {
+      const response = await fetchFromAPI('/api/admin/force-refresh');
+      
+      if (response.success) {
+        await bot.editMessageText("✅ *Force Refresh Successful*\n\n" + response.message, {
+          chat_id: chatId,
+          message_id: statusMessage.message_id,
+          parse_mode: 'Markdown'
+        });
+      } else {
+        throw new Error(response.error?.message || 'Unknown error');
+      }
+    } catch (error) {
+      console.error('Error in force refresh command:', error.message);
+      
+      await bot.editMessageText("❌ *Force Refresh Failed*\n\n" + error.message, {
+        chat_id: chatId,
+        message_id: statusMessage.message_id,
+        parse_mode: 'Markdown'
+      });
+    }
+  });
+});
+
+// Force save command (admin only)
+bot.onText(/\/force_save/, (msg) => {
+  const chatId = msg.chat.id;
+  
+  requireAdmin(msg, async () => {
+    const statusMessage = await bot.sendMessage(chatId, "⏳ Forcing save of all data...");
+    
+    try {
+      const response = await fetchFromAPI('/api/admin/force-save');
+      
+      if (response.success) {
+        await bot.editMessageText("✅ *Force Save Successful*\n\n" + response.message, {
+          chat_id: chatId,
+          message_id: statusMessage.message_id,
+          parse_mode: 'Markdown'
+        });
+      } else {
+        throw new Error(response.error?.message || 'Unknown error');
+      }
+    } catch (error) {
+      console.error('Error in force save command:', error.message);
+      
+      await bot.editMessageText("❌ *Force Save Failed*\n\n" + error.message, {
+        chat_id: chatId,
+        message_id: statusMessage.message_id,
+        parse_mode: 'Markdown'
+      });
+    }
+  });
+});
+
+// Fetch all command (admin only)
+bot.onText(/\/fetch_all/, (msg) => {
+  const chatId = msg.chat.id;
+  
+  requireAdmin(msg, async () => {
+    const statusMessage = await bot.sendMessage(chatId, "⏳ Fetching all transactions (this may take a while)...");
+    
+    try {
+      const response = await fetchFromAPI('/api/admin/fetch-all');
+      
+      if (response.success) {
+        await bot.editMessageText("✅ *Fetch All Successful*\n\n" + response.message, {
+          chat_id: chatId,
+          message_id: statusMessage.message_id,
+          parse_mode: 'Markdown'
+        });
+      } else {
+        throw new Error(response.error?.message || 'Unknown error');
+      }
+    } catch (error) {
+      console.error('Error in fetch all command:', error.message);
+      
+      await bot.editMessageText("❌ *Fetch All Failed*\n\n" + error.message, {
+        chat_id: chatId,
+        message_id: statusMessage.message_id,
+        parse_mode: 'Markdown'
+      });
+    }
+  });
+});
 
 // Helper function to fetch data from API with error handling
 async function fetchFromAPI(endpoint) {
@@ -343,14 +508,27 @@ bot.onText(/\/start/, (msg) => {
 // Help command
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
-  const message = 
+  const userId = msg.from.id;
+  
+  let message = 
     "📚 *SOL Distribution Tracker Bot Help*\n\n" +
     "Available commands:\n\n" +
     "*/stats* - View distribution statistics\n" +
     "*/balance* - Check distribution wallet balance\n" +
     "*/balance [address]* - Check any wallet's balance\n" +
-    "*/help* - Show this help message\n\n" +
-    "For any issues, please contact the administrator.";
+    "*/help* - Show this help message\n\n";
+  
+  // Add admin commands if the user is an admin
+  if (isAdmin(userId)) {
+    message += 
+      "*Admin Commands:*\n\n" +
+      "*/force_refresh* - Force refresh all transactions\n" +
+      "*/force_save* - Force save all data\n" +
+      "*/fetch_all* - Fetch all transactions\n" +
+      "*/stop* - Stop the bot (will restart automatically)\n\n";
+  }
+  
+  message += "For any issues, please contact the administrator.";
   
   bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 });
