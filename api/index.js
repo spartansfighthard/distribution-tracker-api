@@ -41,7 +41,7 @@ const CONFIG = {
   // Background jobs
   backgroundJobs: {
     enabled: true,
-    autoFetchInterval: 3 * 60 * 1000, // Auto-fetch every 3 minutes (reduced from 5)
+    autoFetchInterval: 60 * 1000, // Auto-fetch every 60 seconds (reduced from 3 minutes)
     maxConsecutiveErrors: 3,
     errorBackoffMultiplier: 2,
     maxBackoffInterval: 30 * 60 * 1000 // Maximum backoff of 30 minutes
@@ -2850,9 +2850,6 @@ function startBackgroundJobs() {
 // Initialize the app
 initializeApp();
 
-// Export for Vercel serverless deployment
-module.exports = app; 
-
 // Add a new endpoint to force save to Blob storage
 app.get('/api/force-save', asyncHandler(async (req, res) => {
   console.log('Forcing save to Blob storage...');
@@ -3609,3 +3606,9 @@ app.get('/track-wallet', (req, res) => {
   
   res.send(html);
 });
+
+// Initialize the app
+initializeApp();
+
+// Export for Vercel serverless deployment
+module.exports = app; 
