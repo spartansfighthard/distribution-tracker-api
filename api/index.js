@@ -1266,7 +1266,22 @@ const asyncHandler = fn => async (req, res, next) => {
 
 // Root route handler
 app.get('/', (req, res) => {
-  res.redirect('/track-wallet');
+  res.json({
+    name: "Distribution Tracker API",
+    version: "1.0.0",
+    endpoints: [
+      "/api/stats",
+      "/api/distributed",
+      "/api/sol",
+      "/api/refresh",
+      "/api/fetch-all",
+      "/api/fetch-status",
+      "/api/force-save",
+      "/api/force-refresh",
+      "/api/help"
+    ],
+    message: "Use /api/help for more information about the endpoints"
+  });
 });
 
 // Health check endpoint
@@ -3593,9 +3608,4 @@ app.get('/track-wallet', (req, res) => {
   `;
   
   res.send(html);
-});
-
-// Add a root route that redirects to the wallet tracking page
-app.get('/', (req, res) => {
-  res.redirect('/track-wallet');
 });
