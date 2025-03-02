@@ -3372,27 +3372,29 @@ app.get('/track-wallet', (req, res) => {
       body {
         font-family: Arial, sans-serif;
         line-height: 1.6;
-        max-width: 800px;
         margin: 0 auto;
         padding: 20px;
         color: #333;
+        max-width: 800px;
+        background-color: #f5f5f5;
       }
       h1 {
         color: #2c3e50;
-        margin-bottom: 20px;
+        text-align: center;
+        margin-bottom: 30px;
       }
       .container {
-        background-color: #f9f9f9;
+        background-color: white;
+        padding: 30px;
         border-radius: 8px;
-        padding: 20px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
       }
       .form-group {
-        margin-bottom: 15px;
+        margin-bottom: 20px;
       }
       label {
         display: block;
-        margin-bottom: 5px;
+        margin-bottom: 8px;
         font-weight: bold;
       }
       input[type="text"] {
@@ -3406,10 +3408,12 @@ app.get('/track-wallet', (req, res) => {
         background-color: #3498db;
         color: white;
         border: none;
-        padding: 10px 15px;
+        padding: 12px 20px;
         border-radius: 4px;
         cursor: pointer;
         font-size: 16px;
+        display: block;
+        width: 100%;
       }
       button:hover {
         background-color: #2980b9;
@@ -3430,51 +3434,63 @@ app.get('/track-wallet', (req, res) => {
         color: #721c24;
         border: 1px solid #f5c6cb;
       }
-      .current-wallet {
-        margin-top: 20px;
-        padding: 15px;
-        background-color: #e8f4fd;
+      .info {
+        background-color: #e2f0fb;
+        color: #0c5460;
+        border: 1px solid #bee5eb;
+      }
+      .tracked-wallets {
+        margin-top: 30px;
+      }
+      .wallet-item {
+        background-color: #f8f9fa;
+        padding: 10px 15px;
+        margin-bottom: 10px;
         border-radius: 4px;
-        border: 1px solid #b8daff;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .remove-btn {
+        background-color: #dc3545;
+        color: white;
+        border: none;
+        padding: 5px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .remove-btn:hover {
+        background-color: #c82333;
       }
     </style>
   </head>
   <body>
     <div class="container">
       <h1>Track Your Solana Wallet</h1>
-      <p>Enter your Solana wallet address below to start tracking your rewards and transactions.</p>
+      <p>Enter your Solana wallet address below to track rewards and distributions.</p>
       
       <div class="form-group">
         <label for="walletAddress">Solana Wallet Address:</label>
         <input type="text" id="walletAddress" name="walletAddress" placeholder="Enter your Solana wallet address" required>
       </div>
       
-      <button id="trackButton">Start Tracking</button>
+      <button id="trackWalletBtn">Track Wallet</button>
       
       <div id="result" class="result"></div>
       
-      <div id="currentWallet" class="current-wallet" style="display: none;">
-        <h3>Currently Tracking:</h3>
-        <p id="currentWalletAddress"></p>
-        <button id="stopTrackingButton">Stop Tracking</button>
+      <div class="tracked-wallets">
+        <h2>Your Tracked Wallets</h2>
+        <div id="walletsList"></div>
       </div>
     </div>
     
     <script>
       document.addEventListener('DOMContentLoaded', function() {
-        // Check if we're already tracking a wallet
-        fetch('/api/wallet/tracked')
-          .then(response => response.json())
-          .then(data => {
-            if (data.success && data.trackedWalletCount > 0) {
-              document.getElementById('currentWallet').style.display = 'block';
-              document.getElementById('currentWalletAddress').textContent = data.trackedWallets.join(', ');
-            }
-          })
-          .catch(error => console.error('Error checking tracked wallets:', error));
+        // Load tracked wallets when page loads
+        fetchTrackedWallets();
         
         // Handle form submission
-        document.getElementById('trackButton').addEventListener('click', function() {
+        document.getElementById('trackWalletBtn').addEventListener('click', function() {
           const walletAddress = document.getElementById('walletAddress').value.trim();
           
           if (!walletAddress) {
@@ -3482,6 +3498,13 @@ app.get('/track-wallet', (req, res) => {
             return;
           }
           
+          // Validate Solana wallet address format (base58, 32-44 chars)
+          if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(walletAddress)) {
+            showResult('Invalid Solana wallet address format', 'error');
+            return;
+          }
+          
+          // Send request to track wallet
           fetch('/api/wallet/track', {
             method: 'POST',
             headers: {
@@ -3492,30 +3515,9 @@ app.get('/track-wallet', (req, res) => {
           .then(response => response.json())
           .then(data => {
             if (data.success) {
-              showResult('Wallet added successfully! We are now tracking your transactions.', 'success');
-              document.getElementById('currentWallet').style.display = 'block';
-              document.getElementById('currentWalletAddress').textContent = data.trackedWallets.join(', ');
-            } else {
-              showResult('Error: ' + (data.error?.message || 'Unknown error'), 'error');
-            }
-          })
-          .catch(error => {
-            showResult('Error: ' + error.message, 'error');
-          });
-        });
-        
-        // Handle stop tracking
-        document.getElementById('stopTrackingButton').addEventListener('click', function() {
-          const walletAddress = document.getElementById('currentWalletAddress').textContent.trim();
-          
-          fetch('/api/wallet/track/' + walletAddress, {
-            method: 'DELETE'
-          })
-          .then(response => response.json())
-          .then(data => {
-            if (data.success) {
-              showResult('Wallet removed from tracking.', 'success');
-              document.getElementById('currentWallet').style.display = 'none';
+              showResult('Wallet successfully tracked!', 'success');
+              document.getElementById('walletAddress').value = '';
+              fetchTrackedWallets(); // Refresh the list
             } else {
               showResult('Error: ' + (data.error?.message || 'Unknown error'), 'error');
             }
@@ -3530,6 +3532,59 @@ app.get('/track-wallet', (req, res) => {
           resultElement.textContent = message;
           resultElement.className = 'result ' + type;
           resultElement.style.display = 'block';
+        }
+        
+        function fetchTrackedWallets() {
+          fetch('/api/wallet/tracked')
+          .then(response => response.json())
+          .then(data => {
+            const walletsList = document.getElementById('walletsList');
+            walletsList.innerHTML = '';
+            
+            if (data.success && data.wallets && data.wallets.length > 0) {
+              data.wallets.forEach(wallet => {
+                const walletItem = document.createElement('div');
+                walletItem.className = 'wallet-item';
+                
+                const walletText = document.createElement('span');
+                walletText.textContent = wallet;
+                walletItem.appendChild(walletText);
+                
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'remove-btn';
+                removeBtn.textContent = 'Remove';
+                removeBtn.onclick = function() {
+                  removeWallet(wallet);
+                };
+                walletItem.appendChild(removeBtn);
+                
+                walletsList.appendChild(walletItem);
+              });
+            } else {
+              walletsList.innerHTML = '<p>No wallets currently tracked. Add one above.</p>';
+            }
+          })
+          .catch(error => {
+            console.error('Error fetching tracked wallets:', error);
+          });
+        }
+        
+        function removeWallet(walletAddress) {
+          fetch('/api/wallet/track/' + walletAddress, {
+            method: 'DELETE'
+          })
+          .then(response => response.json())
+          .then(data => {
+            if (data.success) {
+              showResult('Wallet removed from tracking', 'info');
+              fetchTrackedWallets(); // Refresh the list
+            } else {
+              showResult('Error removing wallet: ' + (data.error?.message || 'Unknown error'), 'error');
+            }
+          })
+          .catch(error => {
+            showResult('Error: ' + error.message, 'error');
+          });
         }
       });
     </script>
