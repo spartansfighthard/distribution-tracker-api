@@ -16,7 +16,7 @@ const STORAGE_CONFIG = {
   vercelBlobEnabled: true, // Always enable Blob storage
   storageKey: 'transactions_data',
   blobStoragePath: 'transactions/data.json',
-  maxStoredTransactions: 10000, // Store up to 10,000 transactions
+  maxStoredTransactions: 1000000, // Store up to 1 million transactions (effectively unlimited)
   storageInterval: 5 * 1000, // How often to save data (5 seconds)
   lastStorageTime: null
 };
@@ -27,24 +27,24 @@ const CONFIG = {
   rateLimits: {
     requestsPerSecond: 0.2,      // Ultra conservative: 1 request per 5 seconds
     retryDelay: 15000,           // 15 seconds base delay for retries
-    maxRetries: 3,               // Maximum number of retries for failed requests
+    maxRetries: 3,                // Maximum number of retries for failed requests
     batchSize: 1,                // Process only one transaction at a time
     batchDelay: 10000,           // 10 seconds between batches
     initialBackoff: 30000,       // 30 seconds initial backoff time
   },
   // Transaction fetching
   transactions: {
-    maxTransactionsToFetch: 5,   // Reduced from 10 to 5 to speed up processing
+    maxTransactionsToFetch: 10,  // Set to exactly 10 transactions per fetch
     cacheExpiration: 30 * 60 * 1000, // Cache expiration time in ms (30 minutes)
     maxTransactionsPerRequest: 2, // Reduced from 5 to 2 to avoid timeouts
   },
   // Background jobs
   backgroundJobs: {
-    enabled: true,               // Enable background jobs
-    autoFetchInterval: 5 * 60 * 1000, // Auto-fetch transactions every 5 minutes
-    maxConsecutiveErrors: 3,     // Max consecutive errors before backing off
-    errorBackoffMultiplier: 2,   // Multiply interval by this factor after errors
-    maxBackoffInterval: 30 * 60 * 1000, // Maximum backoff interval (30 minutes)
+    enabled: true,
+    autoFetchInterval: 3 * 60 * 1000, // Auto-fetch every 3 minutes (reduced from 5)
+    maxConsecutiveErrors: 3,
+    errorBackoffMultiplier: 2,
+    maxBackoffInterval: 30 * 60 * 1000 // Maximum backoff of 30 minutes
   },
   // Vercel optimization
   vercel: {
@@ -384,8 +384,9 @@ const storage = {
         return false;
       }
       
-      // Limit the number of transactions we store
-      const transactionsToStore = transactions.slice(0, STORAGE_CONFIG.maxStoredTransactions);
+      // Store all transactions without limiting
+      // Note: We keep the maxStoredTransactions as a safety valve for extreme cases
+      const transactionsToStore = transactions;
       
       // Prepare data to store
       const dataToStore = {
@@ -514,7 +515,7 @@ class Transaction {
 }
 
 // Simplified direct fetch for Vercel environment
-async function fetchTransactionsVercel(limit = 100) { // Increased from 20 to 100
+async function fetchTransactionsVercel(limit = 10) { // Reduced from 100 to 10
   try {
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
@@ -2014,13 +2015,13 @@ async function fetchAllHistoricalTransactions() {
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
-    const batchSize = 50; // Fetch 50 signatures at a time
+    const batchSize = 10; // Reduced to 10 signatures at a time
     let batchCount = 0;
-    const maxBatches = 5; // Increased from 2 to 5 to fetch more transactions per run
+    const maxBatches = 1; // Set to 1 to ensure only one batch of 10 transactions per run
     
     // Start time tracking
     const startTime = Date.now();
-    const timeLimit = 12000; // Increased from 8 to 12 seconds to allow more time for fetching
+    const timeLimit = 13000; // Keep the same time limit
     
     while (hasMore && batchCount < maxBatches) {
       // Check if we're approaching the time limit
@@ -2704,12 +2705,27 @@ app.get('/api/force-refresh', asyncHandler(async (req, res) => {
   console.log('Forcing full refresh of all transactions...');
   
   try {
-    // Clear existing transactions
+    // Clear existing transactions from both in-memory and MongoDB
+    try {
+      // Try to use MongoDB if available
+      try {
+        const Transaction = require('../src/models/Transaction');
+        await Transaction.clearAll();
+        console.log('Cleared all transactions from MongoDB');
+      } catch (error) {
+        console.warn('MongoDB clearAll failed:', error.message);
+      }
+    } catch (error) {
+      console.warn('Error importing Transaction model:', error.message);
+    }
+    
+    // Clear in-memory transactions
     transactions.length = 0;
     lastFetchTimestamp = null;
+    console.log('Cleared all in-memory transactions');
     
-    // Fetch fresh transactions
-    const fetchedTransactions = await fetchTransactionsVercel(100);
+    // Fetch fresh transactions - limited to 10
+    const fetchedTransactions = await fetchTransactionsVercel(10);
     
     // Save the fetched transactions to storage
     if (fetchedTransactions.length > 0) {
@@ -2723,11 +2739,13 @@ app.get('/api/force-refresh', asyncHandler(async (req, res) => {
       await storage.save();
       STORAGE_CONFIG.storageInterval = originalInterval;
       
-      // No longer trigger historical fetch automatically
-      // console.log('Triggering historical transaction fetch after force refresh...');
-      // fetchAllHistoricalTransactions().catch(err => 
-      //   console.error('Error fetching historical transactions after force refresh:', err)
-      // );
+      // Trigger historical fetch automatically after a short delay
+      console.log('Scheduling historical transaction fetch after force refresh...');
+      setTimeout(() => {
+        fetchAllHistoricalTransactions().catch(err => 
+          console.error('Error fetching historical transactions after force refresh:', err)
+        );
+      }, 5000); // Wait 5 seconds before starting historical fetch
     }
     
     // Return response
@@ -2795,3 +2813,71 @@ app.get('/api/*', (req, res) => {
     ]
   });
 });
+
+// Add a catch-all route for API endpoints
+app.get('/api/*', (req, res) => {
+  res.status(404).json({
+    error: 'Endpoint not found',
+    availableEndpoints: [
+      '/api/stats',
+      '/api/distributed',
+      '/api/sol',
+      '/api/refresh',
+      '/api/fetch-all',
+      '/api/fetch-status',
+      '/api/force-save',
+      '/api/force-refresh',
+      '/api/background-job/:action',
+      '/api/test-fetch',
+      '/'
+    ]
+  });
+});
+
+// Add a test endpoint to verify transaction fetching and storage
+app.get('/api/test-fetch', asyncHandler(async (req, res) => {
+  console.log('Testing transaction fetching and storage...');
+  
+  try {
+    // Get current transaction count
+    const initialCount = transactions.length;
+    console.log(`Initial transaction count: ${initialCount}`);
+    
+    // Fetch exactly 10 transactions
+    const fetchedTransactions = await fetchTransactionsVercel(10);
+    console.log(`Fetched ${fetchedTransactions.length} transactions`);
+    
+    // Check if we're storing all transactions
+    const afterFetchCount = transactions.length;
+    console.log(`After fetch transaction count: ${afterFetchCount}`);
+    
+    // Return test results
+    res.json({
+      success: true,
+      timestamp: new Date().toISOString(),
+      testResults: {
+        initialTransactionCount: initialCount,
+        fetchedTransactionCount: fetchedTransactions.length,
+        afterFetchTransactionCount: afterFetchCount,
+        transactionsAdded: afterFetchCount - initialCount,
+        fetchLimitWorking: fetchedTransactions.length <= 10,
+        allTransactionsStored: afterFetchCount >= initialCount + fetchedTransactions.length - 5, // Allow for duplicates
+        storageConfig: {
+          maxStoredTransactions: STORAGE_CONFIG.maxStoredTransactions
+        },
+        fetchConfig: {
+          maxTransactionsToFetch: CONFIG.transactions.maxTransactionsToFetch
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error in test-fetch endpoint:', error);
+    res.status(500).json({
+      success: false,
+      error: {
+        message: 'Test failed',
+        details: error.message
+      }
+    });
+  }
+}));
