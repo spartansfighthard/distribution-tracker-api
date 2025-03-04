@@ -4,8 +4,8 @@
   "description": "API for tracking SOL distribution",
   "main": "index.js",
   "scripts": {
-    "start": "node railway-deploy.js",
-    "dev": "nodemon railway-deploy.js",
+    "start": "node railway-deploy-fixed.js",
+    "dev": "nodemon railway-deploy-fixed.js",
     "healthcheck": "wget -qO- http://localhost:3000/health || exit 1"
   },
   "dependencies": {

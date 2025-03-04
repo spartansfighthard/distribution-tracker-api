@@ -1,1 +1,1 @@
-web: node railway-deploy.js 
+web: node railway-deploy-fixed.js 
