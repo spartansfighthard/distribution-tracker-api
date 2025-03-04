@@ -76,7 +76,8 @@ const CONFIG = {
     maxRetries: process.env.MAX_RETRIES ? parseInt(process.env.MAX_RETRIES) : 3,  // Maximum number of retries for failed requests
     maxQueueSize: process.env.MAX_QUEUE_SIZE ? parseInt(process.env.MAX_QUEUE_SIZE) : 5,  // Reduced queue size
     errorCooldownPeriod: process.env.ERROR_COOLDOWN_PERIOD ? parseInt(process.env.ERROR_COOLDOWN_PERIOD) : 300000, // 5 minute cooldown after consecutive errors
-    maxConsecutiveErrors: process.env.MAX_CONSECUTIVE_ERRORS ? parseInt(process.env.MAX_CONSECUTIVE_ERRORS) : 3 // Max consecutive errors before cooldown
+    maxConsecutiveErrors: process.env.MAX_CONSECUTIVE_ERRORS ? parseInt(process.env.MAX_CONSECUTIVE_ERRORS) : 3, // Max consecutive errors before cooldown
+    cooldownDuration: 60000 // 1 minute default cooldown
   },
 
   // API Security
@@ -118,34 +119,41 @@ class RateLimiter {
     this.requestsPerSecond = requestsPerSecond;
     this.queue = [];
     this.processing = false;
+    this.cooldown = false;
+    this.cooldownEndTime = null;
     this.lastRequestTime = 0;
-    this.consecutiveErrors = 0;
     this.requestCount = 0;
-    this.cooldownUntil = 0;
-    this.cooldownPeriod = 60000; // 1 minute default cooldown
+    this.resetTime = Date.now() + 1000; // Reset counter every second
   }
 
-  // Check if we're in cooldown mode
   isInCooldown() {
-    if (this.cooldownUntil > Date.now()) {
-      const remainingCooldown = Math.ceil((this.cooldownUntil - Date.now()) / 1000);
-      console.log(`Still in cooldown mode for ${remainingCooldown} seconds`);
-      return true;
+    if (!this.cooldown) return false;
+    
+    // Check if cooldown period has expired
+    if (this.cooldownEndTime && Date.now() > this.cooldownEndTime) {
+      console.log(`Cooldown period ended at ${new Date().toISOString()}`);
+      this.cooldown = false;
+      this.cooldownEndTime = null;
+      return false;
     }
-    return false;
+    
+    return this.cooldown;
   }
 
-  // Enter cooldown mode
   enterCooldown(duration = null) {
-    // If duration is provided, use it, otherwise use exponential backoff
-    const cooldownTime = duration || Math.min(
-      this.cooldownPeriod * Math.pow(2, this.consecutiveErrors),
-      300000 // Max 5 minutes
-    );
+    const cooldownDuration = duration || CONFIG.rateLimits.cooldownDuration;
+    this.cooldown = true;
+    this.cooldownEndTime = new Date(Date.now() + cooldownDuration);
+    console.log(`Entering cooldown mode for ${cooldownDuration / 1000} seconds until ${this.cooldownEndTime.toISOString()}`);
     
-    this.cooldownUntil = Date.now() + cooldownTime;
-    console.log(`Entering cooldown mode for ${cooldownTime / 1000} seconds until ${new Date(this.cooldownUntil).toISOString()}`);
-    return cooldownTime;
+    // Schedule automatic cooldown reset
+    setTimeout(() => {
+      if (this.cooldown) {
+        console.log('Cooldown period ended');
+        this.cooldown = false;
+        this.cooldownEndTime = null;
+      }
+    }, cooldownDuration);
   }
 
   async throttle() {
@@ -2402,12 +2410,63 @@ app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
   let responseSent = false;
   
   try {
+    // Check if we're in cooldown mode
+    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
+      const cooldownEndTime = heliusRateLimiter.cooldownEndTime || new Date(Date.now() + 60000);
+      const cooldownRemaining = Math.max(0, cooldownEndTime - Date.now());
+      
+      responseSent = true;
+      return res.status(429).json({
+        success: false,
+        timestamp: new Date().toISOString(),
+        error: {
+          message: 'API is in cooldown mode due to rate limiting',
+          cooldownEndTime: cooldownEndTime.toISOString(),
+          cooldownRemaining: `${Math.ceil(cooldownRemaining / 1000)} seconds`,
+          code: 429
+        },
+        note: 'Please try again after the cooldown period ends'
+      });
+    }
+    
     // Clear existing transactions to ensure we get a fresh fetch of all transactions
     console.log('Clearing existing transactions before fetching all historical data...');
     transactions.length = 0;
     
     // Start the historical fetch with ignoreExistingSignatures set to true
     const newTransactions = await fetchAllHistoricalTransactions(true);
+    
+    // Check if we entered cooldown mode during the fetch
+    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
+      // We still fetched some transactions, so save them
+      try {
+        await storage.save();
+      } catch (saveError) {
+        console.error('Error saving transactions after rate limit:', saveError);
+      }
+      
+      if (!responseSent) {
+        const cooldownEndTime = heliusRateLimiter.cooldownEndTime || new Date(Date.now() + 60000);
+        const cooldownRemaining = Math.max(0, cooldownEndTime - Date.now());
+        
+        responseSent = true;
+        return res.status(429).json({
+          success: false,
+          timestamp: new Date().toISOString(),
+          error: {
+            message: 'Rate limit reached during transaction fetch',
+            cooldownEndTime: cooldownEndTime.toISOString(),
+            cooldownRemaining: `${Math.ceil(cooldownRemaining / 1000)} seconds`,
+            code: 429
+          },
+          partialResults: {
+            transactionsFetched: newTransactions.length,
+            totalTransactions: transactions.length
+          },
+          note: 'Some transactions were fetched before hitting the rate limit. Please try again after the cooldown period ends.'
+        });
+      }
+    }
     
     // Save to storage after fetching, but only if response hasn't been sent yet
     if (!responseSent) {
@@ -2419,7 +2478,7 @@ app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
       
       // Return response
       responseSent = true;
-      res.json({
+      return res.json({
         success: true,
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
@@ -2436,11 +2495,36 @@ app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
     // Only send error response if we haven't sent a response yet
     if (!responseSent) {
       responseSent = true;
-      res.status(500).json({
+      
+      // Check if it's a rate limit error
+      if (error.response && error.response.status === 429) {
+        const cooldownEndTime = new Date(Date.now() + 60000); // Default 60 second cooldown
+        
+        // Enter cooldown mode
+        if (heliusRateLimiter.enterCooldown) {
+          heliusRateLimiter.enterCooldown();
+        }
+        
+        return res.status(429).json({
+          success: false,
+          timestamp: new Date().toISOString(),
+          error: {
+            message: 'Rate limit exceeded',
+            cooldownEndTime: cooldownEndTime.toISOString(),
+            cooldownRemaining: '60 seconds',
+            code: 429
+          },
+          note: 'Please try again after the cooldown period ends'
+        });
+      }
+      
+      // For other errors
+      return res.status(500).json({
         success: false,
         error: {
           message: 'Failed to fetch all historical transactions',
-          details: error.message
+          details: error.message,
+          code: 500
         }
       });
     }
