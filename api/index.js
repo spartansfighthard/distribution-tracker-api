@@ -2112,7 +2112,7 @@ if (process.env.TELEGRAM_BOT_TOKEN && !process.env.VERCEL) {
 }
 
 // Add a function to fetch historical transactions with pagination
-async function fetchAllHistoricalTransactions() {
+async function fetchAllHistoricalTransactions(ignoreExistingSignatures = false) {
   try {
     // Check if API is shut down
     if (await checkApiShutdown()) {
@@ -2142,10 +2142,15 @@ async function fetchAllHistoricalTransactions() {
       return [];
     }
     
-    // First, load any existing transactions
-    await storage.load();
-    const existingSignatures = new Set(transactions.map(tx => tx.signature));
-    console.log(`[Vercel] Loaded ${existingSignatures.size} existing transaction signatures`);
+    // First, load any existing transactions if we're not ignoring them
+    let existingSignatures = new Set();
+    if (!ignoreExistingSignatures) {
+      await storage.load();
+      existingSignatures = new Set(transactions.map(tx => tx.signature));
+      console.log(`[Vercel] Loaded ${existingSignatures.size} existing transaction signatures`);
+    } else {
+      console.log('[Vercel] Ignoring existing signatures for a complete refresh');
+    }
     
     let allNewTransactions = [];
     let hasMore = true;
@@ -2252,7 +2257,7 @@ async function fetchAllHistoricalTransactions() {
       if (newSignatures.length === 0) {
         // If we've reached signatures we already have, we can stop for this run
         // but we'll continue in the next run
-        if (signatures.length > 0 && existingSignatures.has(signatures[0].signature)) {
+        if (signatures.length > 0 && !ignoreExistingSignatures && existingSignatures.has(signatures[0].signature)) {
           console.log('[Vercel] Reached signatures that are already in storage, stopping this run');
           hasMore = false;
           break;
@@ -2393,8 +2398,8 @@ app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
     console.log('Clearing existing transactions before fetching all historical data...');
     transactions.length = 0;
     
-    // Start the historical fetch
-    const newTransactions = await fetchAllHistoricalTransactions();
+    // Start the historical fetch with ignoreExistingSignatures set to true
+    const newTransactions = await fetchAllHistoricalTransactions(true);
     
     // Save to storage after fetching
     await storage.save();
