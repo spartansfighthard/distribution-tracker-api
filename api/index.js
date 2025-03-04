@@ -296,6 +296,32 @@ function authenticateApiKey(req, res, next) {
   next();
 }
 
+// Admin Authentication Middleware
+function requireAdminAuth(req, res, next) {
+  // Get API key from headers or query parameters
+  const apiKey = req.headers['x-api-key'] || req.query.api_key;
+  
+  // Check if it's a Telegram bot request (which we'll consider admin)
+  const isTelegramBot = req.headers['user-agent']?.includes('TelegramBot');
+  
+  // Check if it's a local request (which we'll consider admin)
+  const isLocalRequest = req.headers['x-forwarded-for'] === '127.0.0.1' || req.connection.remoteAddress === '127.0.0.1';
+  
+  // Validate API key matches the configured API key
+  if (apiKey === CONFIG.security.apiKey || isTelegramBot || isLocalRequest) {
+    return next();
+  }
+  
+  // If not authorized, return 403 Forbidden
+  return res.status(403).json({
+    success: false,
+    error: {
+      message: 'Forbidden: Admin access required',
+      code: 403
+    }
+  });
+}
+
 // Apply authentication middleware
 app.use(authenticateApiKey);
 
@@ -1633,7 +1659,7 @@ app.get('/api/sol', asyncHandler(async (req, res) => {
 }));
 
 // Force refresh historical transaction data - Simplified for Vercel
-app.post('/api/refresh', asyncHandler(async (req, res) => {
+app.post('/api/refresh', requireAdminAuth, asyncHandler(async (req, res) => {
   console.log('Refreshing historical transaction data...');
   
   try {
@@ -1721,7 +1747,7 @@ app.post('/api/refresh', asyncHandler(async (req, res) => {
 }));
 
 // Add GET endpoint for /api/refresh to handle browser requests
-app.get('/api/refresh', asyncHandler(async (req, res) => {
+app.get('/api/refresh', requireAdminAuth, asyncHandler(async (req, res) => {
   console.log('GET: Refreshing historical transaction data...');
   
   try {
@@ -2327,69 +2353,7 @@ async function fetchAllHistoricalTransactions() {
 }
 
 // Add a new endpoint to trigger historical fetch
-app.get('/api/fetch-all', asyncHandler(async (req, res) => {
-  console.log('Starting full historical transaction fetch...');
-  
-  try {
-    // Start the historical fetch
-    const newTransactions = await fetchAllHistoricalTransactions();
-    
-    // Return response
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development',
-      vercel: process.env.VERCEL ? true : false,
-      message: 'Historical transaction fetch completed',
-      newTransactionsCount: newTransactions.length,
-      totalTransactionsCount: transactions.length,
-      note: 'This process fetches transactions in batches and may not get all transactions in a single run due to serverless time constraints.'
-    });
-  } catch (error) {
-    console.error('Error in /api/fetch-all:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to fetch all historical transactions',
-        details: error.message
-      }
-    });
-  }
-}));
-
-// Add a new endpoint to trigger historical fetch
-app.get('/api/fetch-all', asyncHandler(async (req, res) => {
-  console.log('Starting continuous transaction fetch...');
-  
-  try {
-    // Start the historical fetch
-    const newTransactions = await fetchAllHistoricalTransactions();
-    
-    // Return response
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development',
-      vercel: process.env.VERCEL ? true : false,
-      message: 'Continuous transaction fetch completed',
-      newTransactionsCount: newTransactions.length,
-      totalTransactionsCount: transactions.length,
-      note: 'This endpoint will always attempt to fetch new transactions regardless of when it was last called. Call it repeatedly to continuously collect all transactions.'
-    });
-  } catch (error) {
-    console.error('Error in /api/fetch-all:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to fetch all historical transactions',
-        details: error.message
-      }
-    });
-  }
-}));
-
-// Add a new endpoint to trigger continuous transaction fetch
-app.get('/api/fetch-all', asyncHandler(async (req, res) => {
+app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
   console.log('Starting continuous transaction fetch...');
   
   try {
@@ -2756,7 +2720,7 @@ function startBackgroundJobs() {
 initializeApp();
 
 // Add a new endpoint to force save to Blob storage
-app.get('/api/force-save', asyncHandler(async (req, res) => {
+app.get('/api/force-save', requireAdminAuth, asyncHandler(async (req, res) => {
   console.log('Forcing save to Blob storage...');
   
   try {
@@ -2831,7 +2795,7 @@ app.get('/api/collection-status', asyncHandler(async (req, res) => {
 }));
 
 // Add a new endpoint to force a full refresh of all transactions
-app.get('/api/force-refresh', asyncHandler(async (req, res) => {
+app.get('/api/force-refresh', requireAdminAuth, asyncHandler(async (req, res) => {
   console.log('Forcing full refresh of all transactions...');
   
   try {
