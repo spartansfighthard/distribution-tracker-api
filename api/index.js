@@ -67,14 +67,16 @@ const STOP_COLLECTION_CONFIG = {
   lastCheckTime: null
 };
 
-// Updated configuration for better rate limiting (2025-02-28)
+// Updated configuration for better rate limiting and timeout handling
 const CONFIG = {
   // API rate limiting
   rateLimits: {
-    requestsPerSecond: 0.2,      // Ultra conservative: 1 request per 5 seconds
-    retryDelay: 15000,           // 15 seconds base delay for retries
-    maxRetries: 3,                // Maximum number of retries for failed requests
-    maxQueueSize: 10             // Maximum number of requests to queue
+    requestsPerSecond: process.env.RATE_LIMIT_REQUESTS_PER_SECOND ? parseFloat(process.env.RATE_LIMIT_REQUESTS_PER_SECOND) : 0.1,  // Ultra conservative: 1 request per 10 seconds
+    retryDelay: process.env.RATE_LIMIT_RETRY_DELAY ? parseInt(process.env.RATE_LIMIT_RETRY_DELAY) : 15000,  // 15 seconds base delay for retries
+    maxRetries: process.env.MAX_RETRIES ? parseInt(process.env.MAX_RETRIES) : 3,  // Maximum number of retries for failed requests
+    maxQueueSize: process.env.MAX_QUEUE_SIZE ? parseInt(process.env.MAX_QUEUE_SIZE) : 5,  // Reduced queue size
+    errorCooldownPeriod: process.env.ERROR_COOLDOWN_PERIOD ? parseInt(process.env.ERROR_COOLDOWN_PERIOD) : 300000, // 5 minute cooldown after consecutive errors
+    maxConsecutiveErrors: process.env.MAX_CONSECUTIVE_ERRORS ? parseInt(process.env.MAX_CONSECUTIVE_ERRORS) : 3 // Max consecutive errors before cooldown
   },
 
   // API Security
@@ -87,30 +89,30 @@ const CONFIG = {
   
   // Transaction fetching
   transactions: {
-    maxTransactionsToFetch: 10,  // Set to exactly 10 transactions per fetch
+    maxTransactionsToFetch: process.env.MAX_TRANSACTIONS_TO_FETCH ? parseInt(process.env.MAX_TRANSACTIONS_TO_FETCH) : 5,  // Reduced from 10 to 5
     cacheExpiration: 30 * 60 * 1000, // Cache expiration time in ms (30 minutes)
-    maxTransactionsPerRequest: 2, // Reduced from 5 to 2 to avoid timeouts
+    maxTransactionsPerRequest: process.env.MAX_TRANSACTIONS_PER_REQUEST ? parseInt(process.env.MAX_TRANSACTIONS_PER_REQUEST) : 1, // Reduced to 1
   },
   // Background jobs
   backgroundJobs: {
-    enabled: true,
-    autoFetchInterval: 60 * 1000, // Auto-fetch every 60 seconds (reduced from 3 minutes)
-    maxConsecutiveErrors: 3,
-    errorBackoffMultiplier: 2,
-    maxBackoffInterval: 30 * 60 * 1000 // Maximum backoff of 30 minutes
+    enabled: process.env.DISABLE_BACKGROUND_JOBS !== 'true',
+    autoFetchInterval: process.env.AUTO_FETCH_INTERVAL ? parseInt(process.env.AUTO_FETCH_INTERVAL) : 120 * 1000, // Increased to 2 minutes
+    maxConsecutiveErrors: process.env.MAX_CONSECUTIVE_ERRORS ? parseInt(process.env.MAX_CONSECUTIVE_ERRORS) : 3,
+    errorBackoffMultiplier: process.env.ERROR_BACKOFF_MULTIPLIER ? parseInt(process.env.ERROR_BACKOFF_MULTIPLIER) : 2,
+    maxBackoffInterval: process.env.MAX_BACKOFF_INTERVAL ? parseInt(process.env.MAX_BACKOFF_INTERVAL) : 30 * 60 * 1000 // Maximum backoff of 30 minutes
   },
   // Vercel optimization
   vercel: {
-    maxProcessingTime: 4000,     // Reduced from 5s to 4s to be even more conservative
-    maxTransactionsPerServerlessRequest: 1, // Reduced from 2 to 1
-    skipRateLimiting: true,      // Skip rate limiting in Vercel environment
-    skipDetailedProcessing: true, // Skip detailed transaction processing in Vercel
-    incrementalFetching: true,   // Enable incremental fetching to avoid timeouts
-    maxSignaturesPerBatch: 5     // Process at most 5 signatures per batch
+    maxProcessingTime: process.env.VERCEL_MAX_PROCESSING_TIME ? parseInt(process.env.VERCEL_MAX_PROCESSING_TIME) : 3000,  // Reduced to 3 seconds
+    maxTransactionsPerServerlessRequest: process.env.MAX_TRANSACTIONS_PER_SERVERLESS_REQUEST ? parseInt(process.env.MAX_TRANSACTIONS_PER_SERVERLESS_REQUEST) : 1, // Keep at 1
+    skipRateLimiting: process.env.SKIP_RATE_LIMITING === 'true',  // Default to false
+    skipDetailedProcessing: process.env.SKIP_DETAILED_PROCESSING !== 'false',  // Default to true
+    incrementalFetching: process.env.INCREMENTAL_FETCHING !== 'false',  // Default to true
+    maxSignaturesPerBatch: process.env.MAX_SIGNATURES_PER_BATCH ? parseInt(process.env.MAX_SIGNATURES_PER_BATCH) : 3  // Reduced from 5 to 3
   }
 };
 
-// Rate limiter utility with proper queue
+// Rate limiter utility with proper queue and circuit breaker
 class RateLimiter {
   constructor(requestsPerSecond = CONFIG.rateLimits.requestsPerSecond) {
     this.requestsPerSecond = requestsPerSecond;
@@ -120,12 +122,44 @@ class RateLimiter {
     this.consecutiveErrors = 0;
     this.requestCount = 0;
     this.lastRateLimitTime = null;
-    this.cooldownPeriod = 60000; // 1 minute cooldown after rate limit
+    this.cooldownPeriod = CONFIG.rateLimits.errorCooldownPeriod; // 5 minute cooldown after consecutive errors
+    this.inCooldown = false;
+    this.cooldownStartTime = null;
+    this.maxConsecutiveErrors = CONFIG.rateLimits.maxConsecutiveErrors;
   }
 
-  // Modified to bypass rate limiting in Vercel environment
+  // Check if we're in cooldown mode
+  isInCooldown() {
+    if (!this.inCooldown) return false;
+    
+    const now = Date.now();
+    if ((now - this.cooldownStartTime) > this.cooldownPeriod) {
+      // Cooldown period has expired
+      console.log(`Cooldown period expired after ${this.cooldownPeriod}ms. Resuming normal operation.`);
+      this.inCooldown = false;
+      this.consecutiveErrors = 0;
+      return false;
+    }
+    
+    return true;
+  }
+
+  // Enter cooldown mode
+  enterCooldown() {
+    this.inCooldown = true;
+    this.cooldownStartTime = Date.now();
+    console.log(`Entering cooldown mode for ${this.cooldownPeriod}ms due to ${this.consecutiveErrors} consecutive errors.`);
+  }
+
+  // Modified to bypass rate limiting in Vercel environment and implement circuit breaker
   async throttle() {
-    // Skip rate limiting in Vercel environment
+    // Check if we're in cooldown mode
+    if (this.isInCooldown()) {
+      const remainingCooldown = this.cooldownPeriod - (Date.now() - this.cooldownStartTime);
+      throw new Error(`API in cooldown mode. Please try again in ${Math.floor(remainingCooldown/1000)} seconds.`);
+    }
+    
+    // Skip rate limiting in Vercel environment if configured
     if (process.env.VERCEL && CONFIG.vercel.skipRateLimiting) {
       this.lastRequestTime = Date.now();
       this.requestCount++;
@@ -168,7 +202,7 @@ class RateLimiter {
     });
   }
 
-  // Process queue
+  // Process queue with circuit breaker pattern
   async processQueue() {
     if (this.queue.length === 0) {
       this.processing = false;
@@ -179,6 +213,12 @@ class RateLimiter {
     const { requestFn, resolve, reject } = this.queue.shift();
 
     try {
+      // Check if we're in cooldown mode
+      if (this.isInCooldown()) {
+        const remainingCooldown = this.cooldownPeriod - (Date.now() - this.cooldownStartTime);
+        throw new Error(`API in cooldown mode. Please try again in ${Math.floor(remainingCooldown/1000)} seconds.`);
+      }
+      
       await this.throttle();
       const result = await requestFn();
       // Reset consecutive errors on success
@@ -190,21 +230,37 @@ class RateLimiter {
         this.consecutiveErrors++;
         this.lastRateLimitTime = Date.now();
         
-        const waitTime = CONFIG.rateLimits.initialBackoff * Math.pow(2, this.consecutiveErrors - 1);
-        console.log(`Rate limit hit, waiting ${waitTime}ms before continuing (consecutive errors: ${this.consecutiveErrors})...`);
-        await setTimeoutPromise(waitTime);
+        console.log(`Rate limit hit, consecutive errors: ${this.consecutiveErrors}/${this.maxConsecutiveErrors}`);
         
-        // Put the request back at the front of the queue if we haven't exceeded max retries
-        if (this.consecutiveErrors <= CONFIG.rateLimits.maxRetries) {
-          console.log(`Retrying request after rate limit (attempt ${this.consecutiveErrors}/${CONFIG.rateLimits.maxRetries})`);
-          this.queue.unshift({ requestFn, resolve, reject });
+        // Check if we've hit too many consecutive errors
+        if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
+          console.log(`Too many consecutive errors (${this.consecutiveErrors}). Entering cooldown mode.`);
+          this.enterCooldown();
+          reject(new Error(`Rate limit exceeded. API entering cooldown mode for ${this.cooldownPeriod/1000} seconds.`));
         } else {
-          console.log(`Exceeded maximum retries (${CONFIG.rateLimits.maxRetries}) after rate limit`);
-          reject(error);
+          const waitTime = CONFIG.rateLimits.retryDelay * Math.pow(2, this.consecutiveErrors - 1);
+          console.log(`Rate limit hit, waiting ${waitTime}ms before continuing...`);
+          await setTimeoutPromise(waitTime);
+          
+          // Put the request back at the front of the queue if we haven't exceeded max retries
+          if (this.consecutiveErrors <= CONFIG.rateLimits.maxRetries) {
+            console.log(`Retrying request after rate limit (attempt ${this.consecutiveErrors}/${CONFIG.rateLimits.maxRetries})`);
+            this.queue.unshift({ requestFn, resolve, reject });
+          } else {
+            console.log(`Exceeded maximum retries (${CONFIG.rateLimits.maxRetries}) after rate limit`);
+            reject(error);
+          }
         }
       } else {
-        // For other errors, increment consecutive errors but don't retry
+        // For other errors, increment consecutive errors
         this.consecutiveErrors++;
+        
+        // Check if we've hit too many consecutive errors
+        if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
+          console.log(`Too many consecutive errors (${this.consecutiveErrors}). Entering cooldown mode.`);
+          this.enterCooldown();
+        }
+        
         reject(error);
       }
     } finally {
@@ -2949,77 +3005,79 @@ async function checkStopCollectionFlag() {
 
 // Function to start background jobs
 function startBackgroundJobs() {
-  console.log('Starting background jobs for continuous data collection...');
+  if (!CONFIG.backgroundJobs.enabled) {
+    console.log('Background jobs are disabled');
+    return;
+  }
   
-  // Function to run the auto-fetch job
+  console.log('Starting background jobs');
+  
+  // Auto-fetch job
   async function runAutoFetchJob() {
-    // Check if data collection should be stopped
-    if (await checkStopCollectionFlag()) {
-      console.log('Data collection has been stopped. Background jobs will not run.');
-      backgroundJobState.isRunning = false;
+    // Skip if data collection is disabled
+    if (global.STOP_DATA_COLLECTION || process.env.DISABLE_DATA_COLLECTION === 'true') {
+      console.log('Data collection is disabled, skipping auto-fetch job');
+      // Schedule next run
+      nodeSetTimeout(runAutoFetchJob, CONFIG.backgroundJobs.autoFetchInterval);
       return;
     }
     
-    if (backgroundJobState.isRunning) {
-      console.log('Auto-fetch job already running, skipping this run');
+    // Skip if in cooldown mode
+    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
+      console.log('API is in cooldown mode, skipping auto-fetch job');
+      // Schedule next run with a longer interval
+      nodeSetTimeout(runAutoFetchJob, Math.min(
+        heliusRateLimiter.cooldownPeriod / 2, 
+        CONFIG.backgroundJobs.autoFetchInterval * 2
+      ));
       return;
     }
-    
-    backgroundJobState.isRunning = true;
     
     try {
-      console.log(`Running auto-fetch job at ${new Date().toISOString()}`);
+      console.log('Running auto-fetch job');
+      backgroundJobState.isRunning = true;
+      backgroundJobState.lastRunTime = Date.now();
       
-      // Fetch historical transactions
-      const newTransactions = await fetchAllHistoricalTransactions();
-      
-      console.log(`Auto-fetch job completed: fetched ${newTransactions.length} new transactions`);
-      
-      // Check for new rewards and notify users
-      if (newTransactions.length > 0) {
-        console.log('Checking for new rewards to notify users...');
-        await checkAndNotifyNewRewards();
-      }
+      // Fetch new transactions with a small limit to avoid timeouts
+      const fetchLimit = Math.min(5, CONFIG.transactions.maxTransactionsToFetch);
+      await fetchTransactions(fetchLimit);
       
       // Reset consecutive errors on success
       backgroundJobState.consecutiveErrors = 0;
       backgroundJobState.currentInterval = CONFIG.backgroundJobs.autoFetchInterval;
       
+      console.log('Auto-fetch job completed successfully');
     } catch (error) {
-      console.error('Error in auto-fetch job:', error);
+      console.error('Error in auto-fetch job:', error.message);
       
-      // Increase consecutive errors and apply backoff
+      // Increment consecutive errors and apply backoff
       backgroundJobState.consecutiveErrors++;
       
-      if (backgroundJobState.consecutiveErrors > CONFIG.backgroundJobs.maxConsecutiveErrors) {
-        // Apply backoff to the interval
+      if (backgroundJobState.consecutiveErrors >= CONFIG.backgroundJobs.maxConsecutiveErrors) {
+        console.log(`Too many consecutive errors (${backgroundJobState.consecutiveErrors}). Increasing backoff interval.`);
+        
+        // Apply exponential backoff
         backgroundJobState.currentInterval = Math.min(
           backgroundJobState.currentInterval * CONFIG.backgroundJobs.errorBackoffMultiplier,
           CONFIG.backgroundJobs.maxBackoffInterval
         );
         
-        console.log(`Backing off auto-fetch job due to errors. New interval: ${backgroundJobState.currentInterval / 1000} seconds`);
+        console.log(`New backoff interval: ${backgroundJobState.currentInterval}ms`);
       }
     } finally {
       backgroundJobState.isRunning = false;
-      backgroundJobState.lastRunTime = new Date();
       
-      // Schedule the next run only if not stopped
-      if (!backgroundJobState.isStopped) {
-        backgroundJobState.timerId = setTimeout(runAutoFetchJob, backgroundJobState.currentInterval);
-      } else {
-        console.log('Background jobs have been stopped. Not scheduling next run.');
-      }
+      // Schedule next run with current interval (which may have been increased due to errors)
+      console.log(`Scheduling next auto-fetch job in ${backgroundJobState.currentInterval}ms`);
+      nodeSetTimeout(runAutoFetchJob, backgroundJobState.currentInterval);
     }
   }
   
-  // Start the auto-fetch job immediately
-  runAutoFetchJob();
+  // Start the auto-fetch job
+  nodeSetTimeout(runAutoFetchJob, CONFIG.backgroundJobs.autoFetchInterval);
   
-  // Set up periodic check for stop flag
-  setInterval(async () => {
-    await checkStopCollectionFlag();
-  }, STOP_COLLECTION_CONFIG.checkInterval);
+  // Also start the stop collection flag check job
+  nodeSetTimeout(checkStopCollectionFlag, STOP_COLLECTION_CONFIG.checkInterval);
 }
 
 // Initialize the app
