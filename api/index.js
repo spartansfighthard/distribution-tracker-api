@@ -472,16 +472,31 @@ const storage = {
       console.log(`Found data blob: ${latestBlob.pathname}, size: ${latestBlob.size} bytes, uploaded at: ${latestBlob.uploadedAt}`);
       
       // Download the blob
-      const data = await this.blobClient.get(latestBlob.url);
+      const data = await this.blobClient.get(latestBlob.pathname);
       if (!data) {
         console.log('Failed to download blob data');
         return false;
       }
       
       // Parse the data
-      const jsonData = await data.json();
-      if (!jsonData || !jsonData.transactions || !Array.isArray(jsonData.transactions)) {
-        console.log('Invalid data format in blob storage');
+      let jsonData;
+      try {
+        // Check if data is already an object or needs to be parsed
+        if (typeof data === 'object' && data !== null) {
+          jsonData = data;
+        } else if (typeof data.text === 'function') {
+          const text = await data.text();
+          jsonData = JSON.parse(text);
+        } else {
+          jsonData = JSON.parse(data);
+        }
+        
+        if (!jsonData || !jsonData.transactions || !Array.isArray(jsonData.transactions)) {
+          console.log('Invalid data format in blob storage');
+          return false;
+        }
+      } catch (error) {
+        console.error('Error parsing blob data:', error);
         return false;
       }
       
@@ -782,13 +797,14 @@ async function fetchTransactionsVercel(limit = 5) { // Reduced from 10 to 5 to p
 async function getTransactionDetails(signature) {
   // Skip detailed processing in Vercel environment if configured
   if (process.env.VERCEL && CONFIG.vercel.skipDetailedProcessing) {
-    return {
+    const txData = {
       signature,
       timestamp: new Date().toISOString(),
       type: 'unknown',
       amount: 0,
       token: 'SOL'
     };
+    return new Transaction(txData);
   }
 
   let retries = 0;
@@ -838,7 +854,7 @@ async function getTransactionDetails(signature) {
         // Save transaction to in-memory storage
         const txModel = new Transaction(transaction);
         await txModel.save();
-        return txModel; // Return the Transaction instance instead of the plain object
+        return txModel; // Return the Transaction instance
       }
       
       return null;
