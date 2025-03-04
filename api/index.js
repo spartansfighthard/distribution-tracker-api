@@ -2389,8 +2389,15 @@ app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
   console.log('Starting continuous transaction fetch...');
   
   try {
+    // Clear existing transactions to ensure we get a fresh fetch of all transactions
+    console.log('Clearing existing transactions before fetching all historical data...');
+    transactions.length = 0;
+    
     // Start the historical fetch
     const newTransactions = await fetchAllHistoricalTransactions();
+    
+    // Save to storage after fetching
+    await storage.save();
     
     // Return response
     res.json({
@@ -2401,7 +2408,7 @@ app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
       message: 'Continuous transaction fetch completed',
       newTransactionsCount: newTransactions.length,
       totalTransactionsCount: transactions.length,
-      note: 'This endpoint will always attempt to fetch new transactions regardless of when it was last called. Call it repeatedly to continuously collect all transactions.'
+      note: 'This endpoint will always fetch all historical transactions by clearing existing data first.'
     });
   } catch (error) {
     console.error('Error in /api/fetch-all:', error);
