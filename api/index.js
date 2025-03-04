@@ -124,6 +124,8 @@ class RateLimiter {
     this.lastRequestTime = 0;
     this.requestCount = 0;
     this.resetTime = Date.now() + 1000; // Reset counter every second
+    this.rateLimitHits = 0;
+    this.lastRateLimitTime = 0;
   }
 
   isInCooldown() {
@@ -134,6 +136,7 @@ class RateLimiter {
       console.log(`Cooldown period ended at ${new Date().toISOString()}`);
       this.cooldown = false;
       this.cooldownEndTime = null;
+      this.rateLimitHits = 0; // Reset rate limit hits counter
       return false;
     }
     
@@ -141,10 +144,27 @@ class RateLimiter {
   }
 
   enterCooldown(duration = null) {
-    const cooldownDuration = duration || CONFIG.rateLimits.cooldownDuration;
+    // Track rate limit hits
+    this.rateLimitHits++;
+    this.lastRateLimitTime = Date.now();
+    
+    // Calculate cooldown duration based on number of rate limit hits
+    // More hits = longer cooldown
+    let cooldownDuration;
+    if (duration) {
+      cooldownDuration = duration;
+    } else {
+      // Exponential backoff based on number of rate limit hits
+      const baseTime = CONFIG.rateLimits.cooldownDuration;
+      cooldownDuration = Math.min(
+        baseTime * Math.pow(2, this.rateLimitHits - 1), 
+        300000 // Max 5 minutes
+      );
+    }
+    
     this.cooldown = true;
     this.cooldownEndTime = new Date(Date.now() + cooldownDuration);
-    console.log(`Entering cooldown mode for ${cooldownDuration / 1000} seconds until ${this.cooldownEndTime.toISOString()}`);
+    console.log(`Entering cooldown mode for ${cooldownDuration / 1000} seconds until ${this.cooldownEndTime.toISOString()} (hit #${this.rateLimitHits})`);
     
     // Schedule automatic cooldown reset
     setTimeout(() => {
@@ -154,6 +174,8 @@ class RateLimiter {
         this.cooldownEndTime = null;
       }
     }, cooldownDuration);
+    
+    return cooldownDuration;
   }
 
   async throttle() {
@@ -2126,280 +2148,284 @@ if (process.env.TELEGRAM_BOT_TOKEN && !process.env.VERCEL) {
 
 // Add a function to fetch historical transactions with pagination
 async function fetchAllHistoricalTransactions(ignoreExistingSignatures = false) {
-  try {
-    // Check if API is shut down
-    if (await checkApiShutdown()) {
-      console.log('[Vercel] API is shut down, skipping historical transaction fetch');
-      return [];
-    }
-    
-    // Check if we're in cooldown mode
-    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
-      console.log('[Vercel] API is in cooldown mode, skipping historical transaction fetch');
-      return [];
-    }
-    
-    // Remove the time-based check to allow continuous scanning
-    // We'll still use rate limiting to prevent API abuse
-    
-    console.log('[Vercel] Starting historical transaction fetch...');
-    
-    if (!HELIUS_API_KEY || !HELIUS_RPC_URL) {
-      console.error('Missing required environment variables for Helius service');
-      return [];
-    }
-    
-    // Check if we have any wallets to track
-    if (trackedWallets.size === 0) {
-      console.log('No wallets to track. Please add a wallet first.');
-      return [];
-    }
-    
-    // First, load any existing transactions if we're not ignoring them
-    let existingSignatures = new Set();
-    if (!ignoreExistingSignatures) {
-      await storage.load();
-      existingSignatures = new Set(transactions.map(tx => tx.signature));
-      console.log(`[Vercel] Loaded ${existingSignatures.size} existing transaction signatures`);
-    } else {
-      console.log('[Vercel] Ignoring existing signatures for a complete refresh');
-    }
-    
-    let allNewTransactions = [];
-    let hasMore = true;
-    let beforeSignature = null;
-    const batchSize = 10; // Keep batch size at 10 signatures at a time
-    let batchCount = 0;
-    // Remove the maxBatches limit to allow continuous scanning
-    // const maxBatches = 1; 
-    
-    // Start time tracking - still keep time limit for each serverless function execution
-    const startTime = Date.now();
-    const timeLimit = 13000; // Keep the same time limit for serverless function
-    
-    // Track if we've found any new transactions in this run
-    let foundNewTransactions = false;
-    
-    // while (hasMore && batchCount < maxBatches) {
-    while (hasMore) {
-      // Check if we're approaching the time limit
-      if (Date.now() - startTime > timeLimit) {
-        console.log(`[Vercel] Approaching time limit, stopping after processing ${batchCount} batches`);
-        break;
-      }
-      
-      batchCount++;
-      console.log(`[Vercel] Fetching batch ${batchCount} of signatures (before: ${beforeSignature || 'none'})...`);
-      
-      // Prepare request data
-      const requestData = {
-        jsonrpc: '2.0',
-        id: 'my-id',
-        method: 'getSignaturesForAddress',
-        params: [
-          DISTRIBUTION_WALLET_ADDRESS,
-          {
-            limit: batchSize,
-            before: beforeSignature
-          }
-        ]
-      };
-      
-      // Add exponential backoff for rate limiting
-      let retryCount = 0;
-      let success = false;
-      let response;
-      
-      while (!success && retryCount < 5) {
-        try {
-          // Make direct request to Helius API
-          response = await axios.post(HELIUS_RPC_URL, requestData, {
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': HELIUS_API_KEY
-            },
-            timeout: 10000 // 10 second timeout
-          });
-          
-          success = true;
-        } catch (error) {
-          retryCount++;
-          const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000); // Exponential backoff, max 30 seconds
-          
-          if (error.response && error.response.status === 429) {
-            console.log(`[Vercel] Rate limit hit (429), retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
-            // Enter cooldown mode if we hit rate limits
-            if (heliusRateLimiter.enterCooldown) {
-              heliusRateLimiter.enterCooldown();
-            }
-          } else {
-            console.log(`[Vercel] Request error: ${error.message}, retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
-          }
-          
-          if (retryCount < 5) {
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-          } else {
-            console.log('[Vercel] Max retries reached, continuing to next batch');
-            break;
-          }
-        }
-      }
-      
-      // Check if response is valid
-      if (!success || !response || !response.data || !response.data.result || response.data.result.length === 0) {
-        console.log('[Vercel] No more signatures found or invalid response');
-        hasMore = false;
-        break;
-      }
-      
-      // Get signatures from response
-      const signatures = response.data.result;
-      console.log(`[Vercel] Fetched ${signatures.length} signatures in batch ${batchCount}`);
-      
-      // Update beforeSignature for next batch
-      if (signatures.length > 0) {
-        beforeSignature = signatures[signatures.length - 1].signature;
-      } else {
-        hasMore = false;
-      }
-      
-      // Filter out signatures we already have
-      const newSignatures = signatures.filter(sig => !existingSignatures.has(sig.signature));
-      console.log(`[Vercel] Found ${newSignatures.length} new signatures in batch ${batchCount}`);
-      
-      if (newSignatures.length === 0) {
-        // If we've reached signatures we already have, we can stop for this run
-        // but we'll continue in the next run
-        if (signatures.length > 0 && !ignoreExistingSignatures && existingSignatures.has(signatures[0].signature)) {
-          console.log('[Vercel] Reached signatures that are already in storage, stopping this run');
-          hasMore = false;
-          break;
-        }
-        
-        // Otherwise continue to next batch
-        continue;
-      }
-      
-      // We found new transactions in this run
-      foundNewTransactions = true;
-      
-      // Process new signatures - OPTIMIZED VERSION
-      // Process up to 10 signatures per run to avoid timeouts
-      const maxSignaturesToProcess = Math.min(newSignatures.length, 10);
-      const batchProcessedTransactions = [];
-      const batchStartTime = Date.now();
-      
-      console.log(`[Vercel] Processing ${maxSignaturesToProcess} out of ${newSignatures.length} signatures to avoid timeouts`);
-      
-      for (let i = 0; i < maxSignaturesToProcess; i++) {
-        // Check if we're approaching the time limit
-        if (Date.now() - startTime > timeLimit - 2000) { // Leave 2 seconds for cleanup
-          console.log(`[Vercel] Approaching overall time limit, stopping signature processing`);
-          break;
-        }
-        
-        const sig = newSignatures[i];
-        try {
-          // Add to existing signatures set to avoid reprocessing in future runs
-          existingSignatures.add(sig.signature);
-          
-          // Prepare request for transaction details
-          const txRequestData = {
-            jsonrpc: '2.0',
-            id: 'tx-details',
-            method: 'getTransaction',
-            params: [
-              sig.signature,
-              {
-                encoding: 'jsonParsed',
-                maxSupportedTransactionVersion: 0
-              }
-            ]
-          };
-          
-          // Add retry logic for transaction details
-          let txRetryCount = 0;
-          let txSuccess = false;
-          let txResponse;
-          
-          while (!txSuccess && txRetryCount < 3) {
-            try {
-              // Make direct request to Helius API
-              txResponse = await axios.post(HELIUS_RPC_URL, txRequestData, {
-                headers: {
-                  'Content-Type': 'application/json',
-                  'x-api-key': HELIUS_API_KEY
-                },
-                timeout: 5000 // 5 second timeout for transaction details
-              });
-              
-              txSuccess = true;
-            } catch (error) {
-              txRetryCount++;
-              const waitTime = Math.min(1000 * Math.pow(2, txRetryCount), 8000); // Shorter backoff for tx details
-              
-              console.log(`[Vercel] Transaction details error: ${error.message}, retrying after ${waitTime}ms (attempt ${txRetryCount}/3)`);
-              
-              if (txRetryCount < 3) {
-                await new Promise(resolve => setTimeout(resolve, waitTime));
-              } else {
-                console.log(`[Vercel] Max retries reached for transaction ${sig.signature}, skipping`);
-                break;
-              }
-            }
-          }
-          
-          // Check if response is valid
-          if (!txSuccess || !txResponse || !txResponse.data || !txResponse.data.result) {
-            console.log(`[Vercel] Invalid transaction details response for ${sig.signature}, skipping`);
-            continue;
-          }
-          
-          // Process transaction
-          const txData = txResponse.data.result;
-          const processedTx = processTransaction(sig.signature, txData);
-          
-          if (processedTx) {
-            // Create and save transaction
-            const tx = new Transaction(processedTx);
-            await tx.save();
-            batchProcessedTransactions.push(tx);
-            allNewTransactions.push(tx);
-          }
-        } catch (error) {
-          console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
-          // Continue with next signature
-        }
-      }
-      
-      console.log(`[Vercel] Processed ${batchProcessedTransactions.length} transactions in ${Date.now() - batchStartTime}ms`);
-      
-      // Save after each batch to ensure we don't lose data
-      if (batchProcessedTransactions.length > 0) {
-        try {
-          await storage.save();
-          console.log(`[Vercel] Saved ${batchProcessedTransactions.length} new transactions to storage`);
-        } catch (saveError) {
-          console.error('[Vercel] Error saving transactions to storage:', saveError.message);
-        }
-      }
-      
-      // Add a small delay between batches to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-    
-    console.log(`[Vercel] Historical fetch complete. Added ${allNewTransactions.length} new transactions in ${batchCount} batches.`);
-    
-    // Update last fetch time only if we found new transactions
-    if (foundNewTransactions) {
-      storage.lastFetchTime = Date.now();
-    }
-    
-    return allNewTransactions;
-  } catch (error) {
-    console.error('[Vercel] Error in historical transaction fetch:', error.message);
+  // Check if API is in shutdown mode
+  if (await checkApiShutdown()) {
+    console.log('[Vercel] API is in shutdown mode, skipping historical fetch');
     return [];
   }
+  
+  // Check if we're in cooldown mode
+  if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
+    const cooldownEndTime = heliusRateLimiter.cooldownEndTime || new Date(Date.now() + 60000);
+    const cooldownRemaining = Math.max(0, cooldownEndTime - Date.now());
+    console.log(`[Vercel] API is in cooldown mode for ${Math.ceil(cooldownRemaining / 1000)} more seconds, skipping historical fetch`);
+    return [];
+  }
+  
+  // Check if required environment variables are set
+  if (!HELIUS_API_KEY || !HELIUS_RPC_URL) {
+    console.log('[Vercel] Missing required environment variables for historical fetch');
+    return [];
+  }
+  
+  // Load existing transactions and track new ones
+  const newTransactions = [];
+  
+  // Load existing signatures to avoid duplicates
+  let existingSignatures = new Set();
+  if (!ignoreExistingSignatures) {
+    existingSignatures = new Set(transactions.map(tx => tx.signature));
+    console.log(`[Vercel] Loaded ${existingSignatures.size} existing signatures to avoid duplicates`);
+  } else {
+    console.log('[Vercel] Ignoring existing signatures as requested');
+  }
+  
+  // Track time to avoid serverless function timeout
+  const startTime = Date.now();
+  const timeLimit = 13000; // 13 seconds for serverless function
+  
+  // Track batches
+  let batchCount = 0;
+  let hasMore = true;
+  let beforeSignature = null;
+  
+  // Track rate limit hits
+  let rateLimitHits = 0;
+  const maxRateLimitHits = 3; // Maximum number of rate limit hits before giving up
+  
+  // Process in batches to avoid timeouts
+  while (hasMore && (Date.now() - startTime) < timeLimit) {
+    batchCount++;
+    
+    // Check if we've hit too many rate limits
+    if (rateLimitHits >= maxRateLimitHits) {
+      console.log(`[Vercel] Hit rate limit ${rateLimitHits} times, stopping historical fetch`);
+      break;
+    }
+    
+    // Check if we're approaching the time limit
+    if ((Date.now() - startTime) > (timeLimit * 0.8)) {
+      console.log(`[Vercel] Approaching time limit, stopping after processing ${batchCount - 1} batches`);
+      break;
+    }
+    
+    // Prepare request data
+    console.log(`[Vercel] Fetching batch ${batchCount} of signatures${beforeSignature ? ` (before: ${beforeSignature})` : ''}...`);
+    
+    const requestData = {
+      jsonrpc: '2.0',
+      id: `historical-fetch-${batchCount}`,
+      method: 'getSignaturesForAddress',
+      params: [
+        DISTRIBUTION_WALLET_ADDRESS,
+        {
+          limit: 10,
+          before: beforeSignature
+        }
+      ]
+    };
+    
+    // Add exponential backoff for rate limiting
+    let retryCount = 0;
+    let success = false;
+    let response;
+    
+    while (!success && retryCount < 5) {
+      try {
+        // Make direct request to Helius API
+        response = await axios.post(HELIUS_RPC_URL, requestData, {
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': HELIUS_API_KEY
+          },
+          timeout: 10000 // 10 second timeout
+        });
+        
+        success = true;
+      } catch (error) {
+        retryCount++;
+        const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000); // Exponential backoff, max 30 seconds
+        
+        if (error.response && error.response.status === 429) {
+          console.log(`[Vercel] Rate limit hit (429), retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+          // Enter cooldown mode if we hit rate limits
+          if (heliusRateLimiter.enterCooldown) {
+            heliusRateLimiter.enterCooldown();
+          }
+          
+          // Track rate limit hits
+          rateLimitHits++;
+          
+          // If we've hit too many rate limits, break out
+          if (rateLimitHits >= maxRateLimitHits) {
+            console.log(`[Vercel] Hit rate limit ${rateLimitHits} times, stopping batch processing`);
+            break;
+          }
+        } else {
+          console.log(`[Vercel] Request error: ${error.message}, retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+        }
+        
+        if (retryCount < 5) {
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        } else {
+          console.log('[Vercel] Max retries reached, continuing to next batch');
+          break;
+        }
+      }
+    }
+    
+    // Check if we're in cooldown mode after the request
+    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
+      console.log('[Vercel] Entered cooldown mode during batch processing, stopping historical fetch');
+      break;
+    }
+    
+    // Check if response is valid
+    if (!success || !response || !response.data || !response.data.result || response.data.result.length === 0) {
+      console.log('[Vercel] No more signatures found or invalid response');
+      hasMore = false;
+      break;
+    }
+    
+    // Get signatures from response
+    const signatures = response.data.result;
+    console.log(`[Vercel] Fetched ${signatures.length} signatures in batch ${batchCount}`);
+    
+    // Update beforeSignature for next batch
+    if (signatures.length > 0) {
+      beforeSignature = signatures[signatures.length - 1].signature;
+    } else {
+      hasMore = false;
+    }
+    
+    // Filter out signatures we already have
+    const newSignatures = signatures.filter(sig => !existingSignatures.has(sig.signature));
+    console.log(`[Vercel] Found ${newSignatures.length} new signatures in batch ${batchCount}`);
+    
+    if (newSignatures.length === 0) {
+      // If we've reached signatures we already have, we can stop for this run
+      // but we'll continue in the next run
+      if (signatures.length > 0 && !ignoreExistingSignatures && existingSignatures.has(signatures[0].signature)) {
+        console.log('[Vercel] Reached signatures that are already in storage, stopping this run');
+        hasMore = false;
+        break;
+      }
+      
+      // Otherwise continue to next batch
+      continue;
+    }
+    
+    // We found new transactions in this run
+    const batchProcessedTransactions = [];
+    const batchStartTime = Date.now();
+    
+    console.log(`[Vercel] Processing ${newSignatures.length} out of ${newSignatures.length} signatures to avoid timeouts`);
+    
+    for (let i = 0; i < newSignatures.length; i++) {
+      // Check if we're approaching the time limit
+      if (Date.now() - startTime > timeLimit - 2000) { // Leave 2 seconds for cleanup
+        console.log(`[Vercel] Approaching overall time limit, stopping signature processing`);
+        break;
+      }
+      
+      const sig = newSignatures[i];
+      try {
+        // Add to existing signatures set to avoid reprocessing in future runs
+        existingSignatures.add(sig.signature);
+        
+        // Prepare request for transaction details
+        const txRequestData = {
+          jsonrpc: '2.0',
+          id: 'tx-details',
+          method: 'getTransaction',
+          params: [
+            sig.signature,
+            {
+              encoding: 'jsonParsed',
+              maxSupportedTransactionVersion: 0
+            }
+          ]
+        };
+        
+        // Add retry logic for transaction details
+        let txRetryCount = 0;
+        let txSuccess = false;
+        let txResponse;
+        
+        while (!txSuccess && txRetryCount < 3) {
+          try {
+            // Make direct request to Helius API
+            txResponse = await axios.post(HELIUS_RPC_URL, txRequestData, {
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': HELIUS_API_KEY
+              },
+              timeout: 5000 // 5 second timeout for transaction details
+            });
+            
+            txSuccess = true;
+          } catch (error) {
+            txRetryCount++;
+            const waitTime = Math.min(1000 * Math.pow(2, txRetryCount), 8000); // Shorter backoff for tx details
+            
+            console.log(`[Vercel] Transaction details error: ${error.message}, retrying after ${waitTime}ms (attempt ${txRetryCount}/3)`);
+            
+            if (txRetryCount < 3) {
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+            } else {
+              console.log(`[Vercel] Max retries reached for transaction ${sig.signature}, skipping`);
+              break;
+            }
+          }
+        }
+        
+        // Check if response is valid
+        if (!txSuccess || !txResponse || !txResponse.data || !txResponse.data.result) {
+          console.log(`[Vercel] Invalid transaction details response for ${sig.signature}, skipping`);
+          continue;
+        }
+        
+        // Process transaction
+        const txData = txResponse.data.result;
+        const processedTx = processTransaction(sig.signature, txData);
+        
+        if (processedTx) {
+          // Create and save transaction
+          const tx = new Transaction(processedTx);
+          await tx.save();
+          batchProcessedTransactions.push(tx);
+          newTransactions.push(tx);
+        }
+      } catch (error) {
+        console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
+        // Continue with next signature
+      }
+    }
+    
+    console.log(`[Vercel] Processed ${batchProcessedTransactions.length} transactions in ${Date.now() - batchStartTime}ms`);
+    
+    // Save after each batch to ensure we don't lose data
+    if (batchProcessedTransactions.length > 0) {
+      try {
+        await storage.save();
+        console.log(`[Vercel] Saved ${batchProcessedTransactions.length} new transactions to storage`);
+      } catch (saveError) {
+        console.error('[Vercel] Error saving transactions to storage:', saveError.message);
+      }
+    }
+    
+    // Add a small delay between batches to avoid rate limiting
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  
+  console.log(`[Vercel] Historical fetch complete. Added ${newTransactions.length} new transactions in ${batchCount} batches.`);
+  
+  // Update last fetch time only if we found new transactions
+  if (newTransactions.length > 0) {
+    storage.lastFetchTime = Date.now();
+  }
+  
+  return newTransactions;
 }
 
 // Add a new endpoint to trigger historical fetch
