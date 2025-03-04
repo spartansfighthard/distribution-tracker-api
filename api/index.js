@@ -232,6 +232,8 @@ const heliusRateLimiter = new RateLimiter(CONFIG.rateLimits.requestsPerSecond);
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, '../public')));
 
 // Middleware to check for API shutdown
 app.use(async (req, res, next) => {
@@ -1085,26 +1087,77 @@ const asyncHandler = fn => async (req, res, next) => {
 
 // Root route handler
 app.get('/', (req, res) => {
-  res.json({
-    name: "Distribution Tracker API",
-    version: "1.1.0", // Updated version number
-    endpoints: [
-      "/api/stats",
-      "/api/distributed",
-      "/api/sol",
-      "/api/refresh",
-      "/api/fetch-all",
-      "/api/fetch-status",
-      "/api/force-save",
-      "/api/force-refresh",
-      "/api/help"
-    ],
-    adminEndpoints: [
-      "/api/admin/stop-collection",
-      "/api/admin/stop-api"
-    ],
-    message: "Use /api/help for more information about the endpoints"
-  });
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Distribution Tracker API</title>
+  
+  <!-- Favicon references -->
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <link rel="manifest" href="/site.webmanifest">
+  
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      margin: 0;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    h1 {
+      color: #2c3e50;
+    }
+    ul {
+      list-style-type: none;
+      padding: 0;
+    }
+    li {
+      margin-bottom: 10px;
+      padding: 10px;
+      background-color: #f8f9fa;
+      border-radius: 4px;
+    }
+    a {
+      color: #3498db;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Distribution Tracker API</h1>
+    <p>Version: 1.1.0</p>
+    <h2>Available Endpoints:</h2>
+    <ul>
+      <li><a href="/api/stats">/api/stats</a> - Get distribution statistics</li>
+      <li><a href="/api/distributed">/api/distributed</a> - Get distributed SOL information</li>
+      <li><a href="/api/sol">/api/sol</a> - Get SOL transaction information</li>
+      <li><a href="/api/refresh">/api/refresh</a> - Refresh transaction data</li>
+      <li><a href="/api/fetch-all">/api/fetch-all</a> - Fetch all historical transactions</li>
+      <li><a href="/api/fetch-status">/api/fetch-status</a> - Check fetch status</li>
+      <li><a href="/api/force-save">/api/force-save</a> - Force save current transactions</li>
+      <li><a href="/api/force-refresh">/api/force-refresh</a> - Force refresh transaction data</li>
+      <li><a href="/api/help">/api/help</a> - Get API help information</li>
+    </ul>
+  </div>
+</body>
+</html>
+  `;
+  
+  res.setHeader('Content-Type', 'text/html');
+  res.send(html);
 });
 
 // Health check endpoint
