@@ -89,7 +89,7 @@ const CONFIG = {
   
   // Transaction fetching
   transactions: {
-    maxTransactionsToFetch: process.env.MAX_TRANSACTIONS_TO_FETCH ? parseInt(process.env.MAX_TRANSACTIONS_TO_FETCH) : 5,  // Reduced from 10 to 5
+    maxTransactionsToFetch: process.env.MAX_TRANSACTIONS_TO_FETCH ? parseInt(process.env.MAX_TRANSACTIONS_TO_FETCH) : 5,  // Reduced from 10 to 5 to prevent timeouts
     cacheExpiration: 30 * 60 * 1000, // Cache expiration time in ms (30 minutes)
     maxTransactionsPerRequest: process.env.MAX_TRANSACTIONS_PER_REQUEST ? parseInt(process.env.MAX_TRANSACTIONS_PER_REQUEST) : 1, // Reduced to 1
   },
@@ -3364,6 +3364,11 @@ app.get('/track-wallet', (req, res) => {
         background-color: #c82333;
       }
     </style>
+    <!-- Favicon references -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+    <link rel="manifest" href="/site.webmanifest">
   </head>
   <body>
     <div class="container">
