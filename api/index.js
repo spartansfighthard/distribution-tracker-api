@@ -632,11 +632,16 @@ class Transaction {
         // Always try to persist to storage after adding a new transaction
         if (process.env.VERCEL) {
           console.log('Saving transaction to persistent storage...');
-          storage.save().catch(err => console.error('Error saving transaction to storage:', err));
+          // Use a non-blocking approach to avoid interfering with response headers
+          setTimeout(() => {
+            storage.save().catch(err => console.error('Error saving transaction to storage:', err));
+          }, 0);
         } else {
           // For local environment, save less frequently
           if (transactions.length % 5 === 0) {
-            storage.save().catch(err => console.error('Error auto-saving transactions:', err));
+            setTimeout(() => {
+              storage.save().catch(err => console.error('Error auto-saving transactions:', err));
+            }, 0);
           }
         }
       }
@@ -2393,6 +2398,9 @@ async function fetchAllHistoricalTransactions(ignoreExistingSignatures = false) 
 app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
   console.log('Starting continuous transaction fetch...');
   
+  // Add a flag to track if response has been sent
+  let responseSent = false;
+  
   try {
     // Clear existing transactions to ensure we get a fresh fetch of all transactions
     console.log('Clearing existing transactions before fetching all historical data...');
@@ -2401,29 +2409,41 @@ app.get('/api/fetch-all', requireAdminAuth, asyncHandler(async (req, res) => {
     // Start the historical fetch with ignoreExistingSignatures set to true
     const newTransactions = await fetchAllHistoricalTransactions(true);
     
-    // Save to storage after fetching
-    await storage.save();
-    
-    // Return response
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development',
-      vercel: process.env.VERCEL ? true : false,
-      message: 'Continuous transaction fetch completed',
-      newTransactionsCount: newTransactions.length,
-      totalTransactionsCount: transactions.length,
-      note: 'This endpoint will always fetch all historical transactions by clearing existing data first.'
-    });
+    // Save to storage after fetching, but only if response hasn't been sent yet
+    if (!responseSent) {
+      try {
+        await storage.save();
+      } catch (saveError) {
+        console.error('Error saving transactions after fetch-all:', saveError);
+      }
+      
+      // Return response
+      responseSent = true;
+      res.json({
+        success: true,
+        timestamp: new Date().toISOString(),
+        environment: process.env.NODE_ENV || 'development',
+        vercel: process.env.VERCEL ? true : false,
+        message: 'Continuous transaction fetch completed',
+        newTransactionsCount: newTransactions.length,
+        totalTransactionsCount: transactions.length,
+        note: 'This endpoint will always fetch all historical transactions by clearing existing data first.'
+      });
+    }
   } catch (error) {
     console.error('Error in /api/fetch-all:', error);
-    res.status(500).json({
-      success: false,
-      error: {
-        message: 'Failed to fetch all historical transactions',
-        details: error.message
-      }
-    });
+    
+    // Only send error response if we haven't sent a response yet
+    if (!responseSent) {
+      responseSent = true;
+      res.status(500).json({
+        success: false,
+        error: {
+          message: 'Failed to fetch all historical transactions',
+          details: error.message
+        }
+      });
+    }
   }
 }));
 
