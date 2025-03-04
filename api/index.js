@@ -917,14 +917,25 @@ function processTransaction(signature, txData) {
     
     if (preBalances && postBalances && accountKeys) {
       // Find index of distribution wallet
-      const walletIndex = accountKeys.findIndex(key => 
-        key.pubkey === DISTRIBUTION_WALLET_ADDRESS
-      );
+      let walletIndex = -1;
+      
+      // First try to find the exact match
+      for (let i = 0; i < accountKeys.length; i++) {
+        const key = accountKeys[i];
+        const pubkey = typeof key === 'string' ? key : key.pubkey;
+        if (pubkey === DISTRIBUTION_WALLET_ADDRESS) {
+          walletIndex = i;
+          break;
+        }
+      }
       
       if (walletIndex >= 0) {
         const preBal = preBalances[walletIndex];
         const postBal = postBalances[walletIndex];
         const diff = postBal - preBal;
+        
+        // Log the balance change for debugging
+        console.log(`Transaction ${signature}: Balance change for wallet ${DISTRIBUTION_WALLET_ADDRESS}: ${diff / 1e9} SOL (pre: ${preBal / 1e9}, post: ${postBal / 1e9})`);
         
         if (diff > 0) {
           // Received SOL
@@ -934,11 +945,17 @@ function processTransaction(signature, txData) {
           transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
           
           // Try to determine sender
-          const senderIndex = preBalances.findIndex((bal, i) => 
-            i !== walletIndex && preBalances[i] > postBalances[i]
-          );
+          let senderIndex = -1;
+          for (let i = 0; i < preBalances.length; i++) {
+            if (i !== walletIndex && preBalances[i] > postBalances[i]) {
+              senderIndex = i;
+              break;
+            }
+          }
+          
           if (senderIndex >= 0) {
-            transaction.sender = accountKeys[senderIndex].pubkey;
+            const senderKey = accountKeys[senderIndex];
+            transaction.sender = typeof senderKey === 'string' ? senderKey : senderKey.pubkey;
           }
         } else if (diff < 0) {
           // Sent SOL
@@ -948,12 +965,23 @@ function processTransaction(signature, txData) {
           transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
           
           // Try to determine receiver
-          const receiverIndex = preBalances.findIndex((bal, i) => 
-            i !== walletIndex && preBalances[i] < postBalances[i]
-          );
-          if (receiverIndex >= 0) {
-            transaction.receiver = accountKeys[receiverIndex].pubkey;
+          let receiverIndex = -1;
+          for (let i = 0; i < preBalances.length; i++) {
+            if (i !== walletIndex && preBalances[i] < postBalances[i]) {
+              receiverIndex = i;
+              break;
+            }
           }
+          
+          if (receiverIndex >= 0) {
+            const receiverKey = accountKeys[receiverIndex];
+            transaction.receiver = typeof receiverKey === 'string' ? receiverKey : receiverKey.pubkey;
+          }
+        } else {
+          // No SOL transfer, might be a different type of transaction
+          transaction.type = 'other';
+          transaction.token = 'SOL';
+          transaction.amount = 0;
         }
       }
     }
@@ -990,6 +1018,10 @@ function getStats() {
       transactionsByWallet: {}
     };
     
+    // Track SOL amounts specifically for the main wallet
+    let totalSolDistributed = 0;
+    let totalSolReceived = 0;
+    
     // Process each transaction
     for (const tx of transactions) {
       // Count by type
@@ -1001,6 +1033,15 @@ function getStats() {
       // Sum amount by token
       if (tx.amount) {
         stats.totalAmountByToken[tx.token] = (stats.totalAmountByToken[tx.token] || 0) + tx.amount;
+        
+        // Track SOL amounts for the main wallet
+        if (tx.token === 'SOL') {
+          if (tx.type === 'sent' && tx.sender === DISTRIBUTION_WALLET_ADDRESS) {
+            totalSolDistributed += tx.amount;
+          } else if (tx.type === 'received' && tx.receiver === DISTRIBUTION_WALLET_ADDRESS) {
+            totalSolReceived += tx.amount;
+          }
+        }
       }
       
       // Count transactions by wallet (sender or receiver)
@@ -1017,6 +1058,14 @@ function getStats() {
       }
     }
     
+    // Add SOL-specific stats
+    stats.solStats = {
+      totalSolDistributed,
+      totalSolReceived,
+      // We don't have real-time balance, so we estimate it
+      estimatedCurrentBalance: totalSolReceived - totalSolDistributed
+    };
+    
     return stats;
   } catch (error) {
     console.error('Error getting transaction statistics:', error);
@@ -1030,7 +1079,12 @@ function getStats() {
         addresses: Array.from(trackedWallets),
         mainWallet: DISTRIBUTION_WALLET_ADDRESS
       },
-      transactionsByWallet: {}
+      transactionsByWallet: {},
+      solStats: {
+        totalSolDistributed: 0,
+        totalSolReceived: 0,
+        estimatedCurrentBalance: 0
+      }
     };
   }
 }
@@ -1325,125 +1379,43 @@ app.get('/api/help', (req, res) => {
 
 // Get overall SOL statistics - Simplified for Vercel
 app.get('/api/stats', asyncHandler(async (req, res) => {
-  console.log('Getting overall SOL statistics...');
-  
   try {
-    // Get limit parameter from request, default to 5
-    const limit = parseInt(req.query.limit) || 5;
-    console.log(`Using limit of ${limit} transactions`);
-    
-    // For Vercel, use a simplified approach
-    if (process.env.VERCEL) {
-      // Try to load from storage first
-      let fetchedTransactions = [];
-      const loadedFromStorage = await storage.load();
-      
-      if (loadedFromStorage && transactions.length > 0) {
-        console.log(`Using ${transactions.length} transactions from storage`);
-        fetchedTransactions = transactions;
-      } else {
-        // If no stored data, fetch fresh data with limited transactions
-        fetchedTransactions = await fetchTransactionsVercel(limit);
-        
-        // Save the fetched transactions to storage
-        if (fetchedTransactions.length > 0) {
-          transactions.length = 0;
-          transactions.push(...fetchedTransactions);
-          lastFetchTimestamp = new Date().toISOString();
-          await storage.save();
-        }
-      }
-      
-      // Calculate statistics from ALL stored transactions
-      const solTransactions = transactions.filter(tx => tx.token === 'SOL');
-      const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
-      const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
-      
-      const totalSent = sentTransactions.reduce((sum, tx) => sum + tx.amount, 0);
-      const totalReceived = receivedTransactions.reduce((sum, tx) => sum + tx.amount, 0);
-      const currentBalance = totalReceived - totalSent;
-      
-      // Format the statistics in the requested format
-      const formattedStats = {
-        title: "📊 SOL Statistics 📊",
-        totalSolDistributed: totalSent.toFixed(7),
-        totalSolReceived: totalReceived.toFixed(7),
-        currentSolBalance: currentBalance.toFixed(7),
-        totalTransactions: transactions.length,
-        distributionWallet: DISTRIBUTION_WALLET_ADDRESS,
-        solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
-      };
-      
-      // Return statistics only (no transaction lists)
-      return res.json({
-        success: true,
-        timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development',
-        vercel: true,
-        note: "Running in optimized mode for Vercel serverless environment",
-        stats: formattedStats,
-        transactionCounts: {
-          totalStoredTransactions: transactions.length,
-          solTransactions: solTransactions.length,
-          receivedTransactions: receivedTransactions.length,
-          sentTransactions: sentTransactions.length
-        },
-        fetchedAt: new Date().toISOString()
-      });
-    }
-    
-    // For non-Vercel environments, use the full implementation
-    if (transactions.length === 0) {
-      await fetchTransactions();
-    } else {
-      // Check cache expiration
-      const cacheExpired = lastFetchTimestamp && 
-        (new Date() - new Date(lastFetchTimestamp)) > CONFIG.transactions.cacheExpiration;
-      
-      if (cacheExpired) {
-        await fetchTransactions();
-      } else {
-        console.log(`Using cached transactions (${transactions.length} transactions)`);
-      }
-    }
-    
-    // Get transaction statistics
+    // Get statistics
     const stats = getStats();
     
-    // Return statistics
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      lastFetch: lastFetchTimestamp,
-      environment: process.env.NODE_ENV || 'development',
-      vercel: false,
-      cacheStatus: {
-        transactionCount: transactions.length,
-        note: "Using cached data when available"
-      },
-      stats
-    });
+    // Format SOL amounts for display
+    const totalSolDistributed = stats.solStats ? formatSol(stats.solStats.totalSolDistributed) : '0.0000000';
+    const totalSolReceived = stats.solStats ? formatSol(stats.solStats.totalSolReceived) : '0.0000000';
+    const currentSolBalance = stats.solStats ? formatSol(stats.solStats.estimatedCurrentBalance) : '0.0000000';
     
-    // Return statistics with tracked wallet info prominently displayed
-    res.json({
+    // Prepare response
+    const response = {
       success: true,
       timestamp: new Date().toISOString(),
-      lastFetch: lastFetchTimestamp,
       environment: process.env.NODE_ENV || 'development',
       vercel: process.env.VERCEL ? true : false,
-      trackedWallets: {
-        count: trackedWallets.size,
-        addresses: Array.from(trackedWallets),
-        mainWallet: DISTRIBUTION_WALLET_ADDRESS
+      note: process.env.VERCEL ? 'Running in optimized mode for Vercel serverless environment' : 'Running in full mode',
+      stats: {
+        title: '📊 SOL Statistics 📊',
+        totalSolDistributed,
+        totalSolReceived,
+        currentSolBalance,
+        totalTransactions: stats.totalTransactions,
+        distributionWallet: DISTRIBUTION_WALLET_ADDRESS,
+        solscanLink: `https://solscan.io/account/${DISTRIBUTION_WALLET_ADDRESS}`
       },
-      cacheStatus: {
-        transactionCount: transactions.length,
-        note: "Using cached data when available"
+      transactionCounts: {
+        totalStoredTransactions: transactions.length,
+        solTransactions: stats.transactionsByToken.SOL || 0,
+        receivedTransactions: stats.transactionsByType.received || 0,
+        sentTransactions: stats.transactionsByType.sent || 0
       },
-      stats
-    });
+      fetchedAt: new Date().toISOString()
+    };
+    
+    res.json(response);
   } catch (error) {
-    console.error('Error in /api/stats:', error);
+    console.error('Error getting statistics:', error);
     res.status(500).json({
       success: false,
       error: {
@@ -1453,6 +1425,12 @@ app.get('/api/stats', asyncHandler(async (req, res) => {
     });
   }
 }));
+
+// Helper function to format SOL amounts
+function formatSol(amount) {
+  if (typeof amount !== 'number') return '0.0000000';
+  return amount.toFixed(7);
+}
 
 // Get SOL distribution data - Simplified for Vercel
 app.get('/api/distributed', asyncHandler(async (req, res) => {
@@ -2861,71 +2839,30 @@ app.get('/api/collection-status', asyncHandler(async (req, res) => {
 
 // Add a new endpoint to force a full refresh of all transactions
 app.get('/api/force-refresh', requireAdminAuth, asyncHandler(async (req, res) => {
-  console.log('Forcing full refresh of all transactions...');
+  console.log('Forcing a full refresh of transactions...');
   
   try {
-    // Clear existing transactions from both in-memory and MongoDB
-    try {
-      // Try to use MongoDB if available
-      try {
-        const Transaction = require('../src/models/Transaction');
-        await Transaction.clearAll();
-        console.log('Cleared all transactions from MongoDB');
-      } catch (error) {
-        console.warn('MongoDB clearAll failed:', error.message);
-      }
-    } catch (error) {
-      console.warn('Error importing Transaction model:', error.message);
-    }
-    
-    // Clear in-memory transactions
+    // Clear existing transactions
     transactions.length = 0;
-    lastFetchTimestamp = null;
-    console.log('Cleared all in-memory transactions');
     
-    // Fetch fresh transactions - limited to 10
-    const fetchedTransactions = await fetchTransactionsVercel(10);
+    // Fetch all historical transactions
+    const newTransactions = await fetchAllHistoricalTransactions();
     
-    // Save the fetched transactions to storage
-    if (fetchedTransactions.length > 0) {
-      transactions.push(...fetchedTransactions);
-      lastFetchTimestamp = new Date().toISOString();
-      
-      // Force save to storage
-      const originalInterval = STORAGE_CONFIG.storageInterval;
-      STORAGE_CONFIG.storageInterval = 0;
-      STORAGE_CONFIG.lastStorageTime = null;
-      await storage.save();
-      STORAGE_CONFIG.storageInterval = originalInterval;
-      
-      // Trigger historical fetch automatically after a short delay
-      console.log('Scheduling historical transaction fetch after force refresh...');
-      setTimeout(() => {
-        fetchAllHistoricalTransactions().catch(err => 
-          console.error('Error fetching historical transactions after force refresh:', err)
-        );
-      }, 5000); // Wait 5 seconds before starting historical fetch
-    }
+    // Force save to storage
+    await storage.save();
     
-    // Return response
     res.json({
       success: true,
-      timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development',
-      vercel: process.env.VERCEL ? true : false,
-      message: 'Forced full refresh of all transactions (without historical fetch)',
+      message: 'Forced refresh completed successfully',
       transactionCount: transactions.length,
-      fetchedTransactions: fetchedTransactions.length,
-      note: 'Only the most recent transactions have been fetched. Use /api/fetch-all to get historical transactions.'
+      newTransactionsCount: newTransactions.length
     });
   } catch (error) {
-    console.error('Error in /api/force-refresh:', error);
+    console.error('Error during forced refresh:', error);
     res.status(500).json({
       success: false,
-      error: {
-        message: 'Failed to force refresh all transactions',
-        details: error.message
-      }
+      message: 'Error during forced refresh',
+      error: error.message
     });
   }
 }));
