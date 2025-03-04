@@ -392,7 +392,17 @@ const storage = {
           // We'll initialize KV storage when needed
         } else if (STORAGE_CONFIG.vercelBlobEnabled) {
           console.log('Vercel Blob storage is enabled');
-          // We'll initialize Blob storage when needed
+          // Initialize Blob storage
+          try {
+            // Import the Vercel Blob client
+            const { put, list, get, del } = await import('@vercel/blob');
+            this.blobClient = { put, list, get, del };
+            console.log('Vercel Blob client initialized successfully');
+          } catch (error) {
+            console.error('Error initializing Vercel Blob client:', error);
+            // Set a flag to avoid repeated failed attempts
+            STORAGE_CONFIG.vercelBlobEnabled = false;
+          }
         } else {
           console.log('No Vercel storage is enabled, using in-memory storage only');
         }
@@ -431,6 +441,12 @@ const storage = {
       // Initialize Vercel Blob if needed
       if (!this.blobClient) {
         await this.init();
+      }
+      
+      // Check if blobClient was successfully initialized
+      if (!this.blobClient || !this.blobClient.list) {
+        console.log('Vercel Blob client not available, skipping blob storage load');
+        return false;
       }
       
       // List available blobs
@@ -509,6 +525,12 @@ const storage = {
         await this.init();
       }
       
+      // Check if blobClient was successfully initialized
+      if (!this.blobClient || !this.blobClient.put) {
+        console.log('Vercel Blob client not available, skipping blob storage save');
+        return false;
+      }
+      
       // Prepare data to save
       const dataToSave = {
         transactions: transactions.map(tx => tx.toJSON()),
@@ -559,6 +581,25 @@ class Transaction {
     this.blockTime = data.blockTime || Math.floor(Date.now() / 1000);
     this.slot = data.slot || 0;
     this.meta = data.meta || {};
+  }
+
+  // Convert transaction to plain JSON object
+  toJSON() {
+    return {
+      signature: this.signature,
+      timestamp: this.timestamp,
+      type: this.type,
+      amount: this.amount,
+      token: this.token,
+      tokenMint: this.tokenMint,
+      sender: this.sender,
+      receiver: this.receiver,
+      fee: this.fee,
+      status: this.status,
+      blockTime: this.blockTime,
+      slot: this.slot,
+      meta: this.meta
+    };
   }
 
   // Save transaction to in-memory storage
