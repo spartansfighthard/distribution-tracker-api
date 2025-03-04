@@ -394,6 +394,14 @@ const storage = {
           console.log('Vercel Blob storage is enabled');
           // Initialize Blob storage
           try {
+            // Set the Vercel Blob token if not already set
+            if (!process.env.BLOB_READ_WRITE_TOKEN) {
+              process.env.BLOB_READ_WRITE_TOKEN = "vercel_blob_rw_ADrk4Ae5fAvwO3MC_E7Sr279qUVHaOYcaZIGLSvhe5oAN4Z";
+              console.log('Set Vercel Blob token from hardcoded value');
+            } else {
+              console.log('Using existing Vercel Blob token from environment');
+            }
+            
             // Import the Vercel Blob client
             const { put, list, get, del } = await import('@vercel/blob');
             this.blobClient = { put, list, get, del };
@@ -830,7 +838,7 @@ async function getTransactionDetails(signature) {
         // Save transaction to in-memory storage
         const txModel = new Transaction(transaction);
         await txModel.save();
-        return transaction;
+        return txModel; // Return the Transaction instance instead of the plain object
       }
       
       return null;
