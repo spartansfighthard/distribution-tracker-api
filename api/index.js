@@ -471,63 +471,52 @@ const storage = {
       const latestBlob = sortedBlobs[0];
       console.log(`Found data blob: ${latestBlob.pathname}, size: ${latestBlob.size} bytes, uploaded at: ${latestBlob.uploadedAt}`);
       
-      // Download the blob
-      const data = await this.blobClient.get(latestBlob.pathname);
-      if (!data) {
-        console.log('Failed to download blob data');
-        return false;
-      }
-      
-      // Parse the data
-      let jsonData;
+      // Download the blob - use fetch instead of direct get method
       try {
-        // Check if data is already an object or needs to be parsed
-        if (typeof data === 'object' && data !== null) {
-          jsonData = data;
-        } else if (typeof data.text === 'function') {
-          const text = await data.text();
-          jsonData = JSON.parse(text);
-        } else {
-          jsonData = JSON.parse(data);
+        const response = await fetch(latestBlob.url);
+        if (!response.ok) {
+          console.log(`Failed to download blob data: ${response.status} ${response.statusText}`);
+          return false;
         }
         
-        if (!jsonData || !jsonData.transactions || !Array.isArray(jsonData.transactions)) {
+        const data = await response.json();
+        if (!data || !data.transactions || !Array.isArray(data.transactions)) {
           console.log('Invalid data format in blob storage');
           return false;
         }
-      } catch (error) {
-        console.error('Error parsing blob data:', error);
+        
+        // Update transactions array
+        transactions.length = 0; // Clear existing transactions
+        data.transactions.forEach(txData => {
+          transactions.push(new Transaction(txData));
+        });
+        
+        // Update last fetch time
+        if (data.lastFetchTime) {
+          this.lastFetchTime = new Date(data.lastFetchTime).getTime();
+          storage.lastFetchTime = this.lastFetchTime;
+        } else {
+          this.lastFetchTime = new Date(latestBlob.uploadedAt).getTime();
+          storage.lastFetchTime = this.lastFetchTime;
+        }
+        
+        console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
+        console.log(`Last fetch timestamp: ${new Date(this.lastFetchTime).toISOString()}`);
+        
+        // Log transaction breakdown
+        const sent = transactions.filter(tx => tx.type === 'sent').length;
+        const received = transactions.filter(tx => tx.type === 'received').length;
+        console.log(`Transaction breakdown: ${transactions.length} SOL transactions (${sent} sent, ${received} received)`);
+        
+        if (transactions.length < CONFIG.transactions.minTransactionsToLoad) {
+          console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
+        }
+        
+        return true;
+      } catch (fetchError) {
+        console.error('Error fetching blob data:', fetchError);
         return false;
       }
-      
-      // Update transactions array
-      transactions.length = 0; // Clear existing transactions
-      jsonData.transactions.forEach(txData => {
-        transactions.push(new Transaction(txData));
-      });
-      
-      // Update last fetch time
-      if (jsonData.lastFetchTime) {
-        this.lastFetchTime = new Date(jsonData.lastFetchTime).getTime();
-        storage.lastFetchTime = this.lastFetchTime;
-      } else {
-        this.lastFetchTime = new Date(latestBlob.uploadedAt).getTime();
-        storage.lastFetchTime = this.lastFetchTime;
-      }
-      
-      console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
-      console.log(`Last fetch timestamp: ${new Date(this.lastFetchTime).toISOString()}`);
-      
-      // Log transaction breakdown
-      const sent = transactions.filter(tx => tx.type === 'sent').length;
-      const received = transactions.filter(tx => tx.type === 'received').length;
-      console.log(`Transaction breakdown: ${transactions.length} SOL transactions (${sent} sent, ${received} received)`);
-      
-      if (transactions.length < CONFIG.transactions.minTransactionsToLoad) {
-        console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
-      }
-      
-      return true;
     } catch (error) {
       console.error('Error loading from Vercel Blob storage:', error);
       return false;
