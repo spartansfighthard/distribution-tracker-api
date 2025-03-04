@@ -121,68 +121,47 @@ class RateLimiter {
     this.lastRequestTime = 0;
     this.consecutiveErrors = 0;
     this.requestCount = 0;
-    this.lastRateLimitTime = null;
-    this.cooldownPeriod = CONFIG.rateLimits.errorCooldownPeriod; // 5 minute cooldown after consecutive errors
-    this.inCooldown = false;
-    this.cooldownStartTime = null;
-    this.maxConsecutiveErrors = CONFIG.rateLimits.maxConsecutiveErrors;
+    this.cooldownUntil = 0;
+    this.cooldownPeriod = 60000; // 1 minute default cooldown
   }
 
   // Check if we're in cooldown mode
   isInCooldown() {
-    if (!this.inCooldown) return false;
-    
-    const now = Date.now();
-    if ((now - this.cooldownStartTime) > this.cooldownPeriod) {
-      // Cooldown period has expired
-      console.log(`Cooldown period expired after ${this.cooldownPeriod}ms. Resuming normal operation.`);
-      this.inCooldown = false;
-      this.consecutiveErrors = 0;
-      return false;
+    if (this.cooldownUntil > Date.now()) {
+      const remainingCooldown = Math.ceil((this.cooldownUntil - Date.now()) / 1000);
+      console.log(`Still in cooldown mode for ${remainingCooldown} seconds`);
+      return true;
     }
-    
-    return true;
+    return false;
   }
 
   // Enter cooldown mode
-  enterCooldown() {
-    this.inCooldown = true;
-    this.cooldownStartTime = Date.now();
-    console.log(`Entering cooldown mode for ${this.cooldownPeriod}ms due to ${this.consecutiveErrors} consecutive errors.`);
+  enterCooldown(duration = null) {
+    // If duration is provided, use it, otherwise use exponential backoff
+    const cooldownTime = duration || Math.min(
+      this.cooldownPeriod * Math.pow(2, this.consecutiveErrors),
+      300000 // Max 5 minutes
+    );
+    
+    this.cooldownUntil = Date.now() + cooldownTime;
+    console.log(`Entering cooldown mode for ${cooldownTime / 1000} seconds until ${new Date(this.cooldownUntil).toISOString()}`);
+    return cooldownTime;
   }
 
-  // Modified to bypass rate limiting in Vercel environment and implement circuit breaker
   async throttle() {
     // Check if we're in cooldown mode
     if (this.isInCooldown()) {
-      const remainingCooldown = this.cooldownPeriod - (Date.now() - this.cooldownStartTime);
-      throw new Error(`API in cooldown mode. Please try again in ${Math.floor(remainingCooldown/1000)} seconds.`);
+      throw new Error('Rate limiter is in cooldown mode');
     }
     
-    // Skip rate limiting in Vercel environment if configured
-    if (process.env.VERCEL && CONFIG.vercel.skipRateLimiting) {
-      this.lastRequestTime = Date.now();
-      this.requestCount++;
-      return;
-    }
-
     const now = Date.now();
-    
-    // If we've hit a rate limit recently, enforce a longer cooldown
-    if (this.lastRateLimitTime && (now - this.lastRateLimitTime) < this.cooldownPeriod) {
-      const remainingCooldown = this.cooldownPeriod - (now - this.lastRateLimitTime);
-      console.log(`In cooldown period after rate limit. Waiting ${remainingCooldown}ms before next request`);
-      await setTimeoutPromise(remainingCooldown);
-    }
-    
     // Add extra delay if we've had consecutive errors
-    const extraDelay = this.consecutiveErrors * 5000; // 5 seconds per consecutive error
-    const baseDelay = Math.max(0, (1000 / this.requestsPerSecond) - (now - this.lastRequestTime));
-    const timeToWait = baseDelay + extraDelay;
+    const extraDelay = this.consecutiveErrors * 2000; // 2 seconds per consecutive error
+    const timeToWait = Math.max(0, (1000 / this.requestsPerSecond) - (now - this.lastRequestTime)) + extraDelay;
     
     if (timeToWait > 0) {
       console.log(`Rate limiting: waiting ${timeToWait}ms before next request (consecutive errors: ${this.consecutiveErrors})`);
-      await setTimeoutPromise(timeToWait);
+      await new Promise(resolve => setTimeout(resolve, timeToWait));
     }
     
     this.lastRequestTime = Date.now();
@@ -192,6 +171,11 @@ class RateLimiter {
   // Add request to queue and process
   async enqueue(requestFn) {
     return new Promise((resolve, reject) => {
+      // Check if we're in cooldown mode
+      if (this.isInCooldown()) {
+        return reject(new Error('Rate limiter is in cooldown mode'));
+      }
+      
       // Add to queue
       this.queue.push({ requestFn, resolve, reject });
       
@@ -202,7 +186,7 @@ class RateLimiter {
     });
   }
 
-  // Process queue with circuit breaker pattern
+  // Process queue
   async processQueue() {
     if (this.queue.length === 0) {
       this.processing = false;
@@ -213,60 +197,25 @@ class RateLimiter {
     const { requestFn, resolve, reject } = this.queue.shift();
 
     try {
-      // Check if we're in cooldown mode
-      if (this.isInCooldown()) {
-        const remainingCooldown = this.cooldownPeriod - (Date.now() - this.cooldownStartTime);
-        throw new Error(`API in cooldown mode. Please try again in ${Math.floor(remainingCooldown/1000)} seconds.`);
-      }
-      
       await this.throttle();
       const result = await requestFn();
       // Reset consecutive errors on success
       this.consecutiveErrors = 0;
       resolve(result);
     } catch (error) {
-      // If we hit a rate limit, record the time and increment consecutive errors
+      // Increment consecutive errors
+      this.consecutiveErrors++;
+      
+      // If we hit a rate limit, enter cooldown mode
       if (error.response && error.response.status === 429) {
-        this.consecutiveErrors++;
-        this.lastRateLimitTime = Date.now();
-        
-        console.log(`Rate limit hit, consecutive errors: ${this.consecutiveErrors}/${this.maxConsecutiveErrors}`);
-        
-        // Check if we've hit too many consecutive errors
-        if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
-          console.log(`Too many consecutive errors (${this.consecutiveErrors}). Entering cooldown mode.`);
-          this.enterCooldown();
-          reject(new Error(`Rate limit exceeded. API entering cooldown mode for ${this.cooldownPeriod/1000} seconds.`));
-        } else {
-          const waitTime = CONFIG.rateLimits.retryDelay * Math.pow(2, this.consecutiveErrors - 1);
-          console.log(`Rate limit hit, waiting ${waitTime}ms before continuing...`);
-          await setTimeoutPromise(waitTime);
-          
-          // Put the request back at the front of the queue if we haven't exceeded max retries
-          if (this.consecutiveErrors <= CONFIG.rateLimits.maxRetries) {
-            console.log(`Retrying request after rate limit (attempt ${this.consecutiveErrors}/${CONFIG.rateLimits.maxRetries})`);
-            this.queue.unshift({ requestFn, resolve, reject });
-          } else {
-            console.log(`Exceeded maximum retries (${CONFIG.rateLimits.maxRetries}) after rate limit`);
-            reject(error);
-          }
-        }
+        const cooldownTime = this.enterCooldown();
+        reject(new Error(`Rate limit hit, entering cooldown for ${cooldownTime / 1000} seconds`));
       } else {
-        // For other errors, increment consecutive errors
-        this.consecutiveErrors++;
-        
-        // Check if we've hit too many consecutive errors
-        if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
-          console.log(`Too many consecutive errors (${this.consecutiveErrors}). Entering cooldown mode.`);
-          this.enterCooldown();
-        }
-        
         reject(error);
       }
     } finally {
       // Continue processing queue after a delay
-      // Use Node's standard setTimeout for callback-style usage
-      nodeSetTimeout(() => this.processQueue(), 1000);
+      setTimeout(() => this.processQueue(), 1000);
     }
   }
 
@@ -443,110 +392,77 @@ const storage = {
   // Load transactions from storage
   async load() {
     try {
-      if (process.env.VERCEL) {
-        // Always try Blob storage in Vercel
-        try {
-          console.log('Attempting to load from Vercel Blob storage...');
-          // Import the Vercel Blob SDK properly
-          const { list, get } = await import('@vercel/blob');
-          
-          // List blobs to check if our data exists
-          const blobs = await list();
-          console.log(`Available blobs: ${blobs.blobs.length}`);
-          
-          // Find all data blobs (they should start with transactions/data)
-          const dataBlobs = blobs.blobs.filter(blob => 
-            blob.pathname.startsWith('transactions/data')
-          ).sort((a, b) => {
-            // Sort by creation time, newest first
-            return new Date(b.uploadedAt) - new Date(a.uploadedAt);
-          });
-          
-          if (dataBlobs.length > 0) {
-            // Use the most recent blob
-            const dataBlob = dataBlobs[0];
-            console.log(`Found data blob: ${dataBlob.pathname}, size: ${dataBlob.size} bytes, uploaded at: ${dataBlob.uploadedAt}`);
-            
-            // Get the blob content using the URL
-            const response = await fetch(dataBlob.url);
-            if (response.ok) {
-              const text = await response.text();
-              try {
-                const storedData = JSON.parse(text);
-                
-                if (storedData.transactions && Array.isArray(storedData.transactions)) {
-                  // Clear existing transactions and add loaded ones
-                  transactions.length = 0;
-                  transactions.push(...storedData.transactions);
-                  lastFetchTimestamp = storedData.lastFetchTimestamp || new Date().toISOString();
-                  console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
-                  console.log(`Last fetch timestamp: ${lastFetchTimestamp}`);
-                  
-                  // Log transaction types and counts for debugging
-                  const solTransactions = transactions.filter(tx => tx.token === 'SOL');
-                  const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
-                  const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
-                  console.log(`Transaction breakdown: ${solTransactions.length} SOL transactions (${sentTransactions.length} sent, ${receivedTransactions.length} received)`);
-                  
-                  // If we have fewer than expected transactions, try to fetch more
-                  if (transactions.length < 100) {
-                    console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
-                    // Trigger a fetch of more transactions in the background
-                    // Use setTimeout to ensure this runs after the current function completes
-                    nodeSetTimeout(() => {
-                      fetchAllHistoricalTransactions().catch(err => 
-                        console.error('Error fetching additional historical transactions:', err)
-                      );
-                    }, 100);
-                  }
-                  
-                  return true;
-                }
-              } catch (parseError) {
-                console.error('Error parsing JSON from blob:', parseError);
-              }
-            } else {
-              console.error(`Failed to fetch blob: ${response.status} ${response.statusText}`);
-            }
-          } else {
-            console.log('No data blobs found in the list, will fetch fresh data');
-            // If no blob found, trigger a historical fetch
-            nodeSetTimeout(() => {
-              fetchAllHistoricalTransactions().catch(err => 
-                console.error('Error fetching historical transactions after blob not found:', err)
-              );
-            }, 100);
-          }
-        } catch (blobError) {
-          console.error('Error loading from Vercel Blob:', blobError);
-        }
-        
-        // If Blob storage failed, we'll use fresh data
-        return false;
-      } else {
-        // For local development, load from file
-        try {
-          const data = await fs.readFile(STORAGE_CONFIG.localFilePath, 'utf8');
-          const parsedData = JSON.parse(data);
-          if (parsedData.transactions && Array.isArray(parsedData.transactions)) {
-            // Clear existing transactions and add loaded ones
-            transactions.length = 0;
-            transactions.push(...parsedData.transactions);
-            lastFetchTimestamp = parsedData.lastFetchTimestamp || new Date().toISOString();
-            console.log(`Loaded ${transactions.length} transactions from local file storage`);
-            return true;
-          }
-        } catch (fileError) {
-          if (fileError.code !== 'ENOENT') {
-            console.error('Error loading from file:', fileError);
-          } else {
-            console.log('No existing transaction file found, starting fresh');
-          }
-        }
+      console.log('Attempting to load from Vercel Blob storage...');
+      
+      // Check if we're in Vercel environment
+      if (!process.env.VERCEL) {
+        console.log('Not in Vercel environment, skipping blob storage load');
         return false;
       }
+      
+      // Initialize Vercel Blob if needed
+      if (!this.blobClient) {
+        await this.init();
+      }
+      
+      // List available blobs
+      const { blobs } = await this.blobClient.list({ prefix: 'transactions/' });
+      console.log(`Available blobs: ${blobs.length}`);
+      
+      if (blobs.length === 0) {
+        console.log('No transaction data found in Vercel Blob storage');
+        return false;
+      }
+      
+      // Find the most recent blob
+      const sortedBlobs = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
+      const latestBlob = sortedBlobs[0];
+      console.log(`Found data blob: ${latestBlob.pathname}, size: ${latestBlob.size} bytes, uploaded at: ${latestBlob.uploadedAt}`);
+      
+      // Download the blob
+      const data = await this.blobClient.get(latestBlob.url);
+      if (!data) {
+        console.log('Failed to download blob data');
+        return false;
+      }
+      
+      // Parse the data
+      const jsonData = await data.json();
+      if (!jsonData || !jsonData.transactions || !Array.isArray(jsonData.transactions)) {
+        console.log('Invalid data format in blob storage');
+        return false;
+      }
+      
+      // Update transactions array
+      transactions.length = 0; // Clear existing transactions
+      jsonData.transactions.forEach(txData => {
+        transactions.push(new Transaction(txData));
+      });
+      
+      // Update last fetch time
+      if (jsonData.lastFetchTime) {
+        this.lastFetchTime = new Date(jsonData.lastFetchTime).getTime();
+        storage.lastFetchTime = this.lastFetchTime;
+      } else {
+        this.lastFetchTime = new Date(latestBlob.uploadedAt).getTime();
+        storage.lastFetchTime = this.lastFetchTime;
+      }
+      
+      console.log(`Loaded ${transactions.length} transactions from Vercel Blob storage`);
+      console.log(`Last fetch timestamp: ${new Date(this.lastFetchTime).toISOString()}`);
+      
+      // Log transaction breakdown
+      const sent = transactions.filter(tx => tx.type === 'sent').length;
+      const received = transactions.filter(tx => tx.type === 'received').length;
+      console.log(`Transaction breakdown: ${transactions.length} SOL transactions (${sent} sent, ${received} received)`);
+      
+      if (transactions.length < CONFIG.transactions.minTransactionsToLoad) {
+        console.log(`Only loaded ${transactions.length} transactions, attempting to fetch more...`);
+      }
+      
+      return true;
     } catch (error) {
-      console.error('Error loading transactions:', error);
+      console.error('Error loading from Vercel Blob storage:', error);
       return false;
     }
   },
@@ -554,91 +470,43 @@ const storage = {
   // Save transactions to storage
   async save() {
     try {
-      // Only save if we have transactions
-      if (transactions.length === 0) {
-        console.log('No transactions to save');
+      // Check if we're in Vercel environment
+      if (!process.env.VERCEL) {
+        console.log('Not in Vercel environment, skipping blob storage save');
         return false;
       }
       
-      const now = Date.now();
-      if (STORAGE_CONFIG.lastStorageTime && 
-          (now - STORAGE_CONFIG.lastStorageTime) < STORAGE_CONFIG.storageInterval) {
-        console.log('Skipping save, not enough time has passed since last save');
-        return false;
+      // Initialize Vercel Blob if needed
+      if (!this.blobClient) {
+        await this.init();
       }
       
-      // Store all transactions without limiting
-      // Note: We keep the maxStoredTransactions as a safety valve for extreme cases
-      const transactionsToStore = transactions;
-      
-      // Prepare data to store
-      const dataToStore = {
-        transactions: transactionsToStore,
-        lastFetchTimestamp,
-        savedAt: new Date().toISOString(),
-        transactionCount: transactionsToStore.length
+      // Prepare data to save
+      const dataToSave = {
+        transactions: transactions.map(tx => tx.toJSON()),
+        lastFetchTime: storage.lastFetchTime || Date.now(),
+        savedAt: new Date().toISOString()
       };
       
-      if (process.env.VERCEL) {
-        // Always use Blob storage in Vercel
-        try {
-          console.log(`Attempting to save ${transactionsToStore.length} transactions to Vercel Blob storage...`);
-          
-          // Check if we're in a serverless function with time constraints
-          const isServerlessFunction = process.env.VERCEL;
-          const startTime = isServerlessFunction ? Date.now() : 0;
-          const timeLimit = isServerlessFunction ? 8000 : Infinity; // 8 seconds max for saving in serverless
-          
-          // Import the Vercel Blob SDK properly
-          const { put } = await import('@vercel/blob');
-          
-          // Convert data to JSON string
-          const jsonData = JSON.stringify(dataToStore);
-          
-          // Create a Blob from the JSON string
-          const blob = new Blob([jsonData], { type: 'application/json' });
-          
-          // Upload to Vercel Blob Storage with a unique filename to avoid caching issues
-          const timestamp = Date.now();
-          const randomId = Math.random().toString(36).substring(2, 8);
-          const uniquePath = STORAGE_CONFIG.blobStoragePath.replace('.json', `-${randomId}.json`);
-          
-          const { url } = await put(uniquePath, blob, {
-            access: 'public',
-          });
-          
-          STORAGE_CONFIG.lastStorageTime = now;
-          console.log(`Saved ${dataToStore.transactions.length} transactions to Vercel Blob storage at ${url}`);
-          
-          // Log transaction types and counts for debugging
-          const solTransactions = dataToStore.transactions.filter(tx => tx.token === 'SOL');
-          const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
-          const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
-          console.log(`Saved transaction breakdown: ${solTransactions.length} SOL transactions (${sentTransactions.length} sent, ${receivedTransactions.length} received)`);
-          
-          return true;
-        } catch (blobError) {
-          console.error('Error saving to Vercel Blob:', blobError);
-          return false;
-        }
-      } else {
-        // For local development, save to file
-        try {
-          await fs.writeFile(
-            STORAGE_CONFIG.localFilePath, 
-            JSON.stringify(dataToStore, null, 2), 
-            'utf8'
-          );
-          STORAGE_CONFIG.lastStorageTime = now;
-          console.log(`Saved ${transactionsToStore.length} transactions to local file storage`);
-          return true;
-        } catch (fileError) {
-          console.error('Error saving to file:', fileError);
-          return false;
-        }
-      }
+      // Generate a unique filename with timestamp
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '');
+      const filename = `transactions/data-${timestamp.substring(0, 6)}.json`;
+      
+      // Upload to Vercel Blob
+      console.log(`Saving ${transactions.length} transactions to Vercel Blob storage as ${filename}...`);
+      const blob = await this.blobClient.put(filename, JSON.stringify(dataToSave), {
+        contentType: 'application/json',
+        access: 'public'
+      });
+      
+      console.log(`Saved to Vercel Blob: ${blob.url}`);
+      
+      // Update the last save time
+      this.lastSaveTime = Date.now();
+      
+      return true;
     } catch (error) {
-      console.error('Error saving transactions:', error);
+      console.error('Error saving to Vercel Blob storage:', error);
       return false;
     }
   }
@@ -703,6 +571,18 @@ class Transaction {
 // Simplified direct fetch for Vercel environment
 async function fetchTransactionsVercel(limit = 5) { // Reduced from 10 to 5 to prevent timeouts
   try {
+    // Check if API is shut down
+    if (await checkApiShutdown()) {
+      console.log('[Vercel] API is shut down, skipping transaction fetch');
+      return [];
+    }
+    
+    // Check if we're in cooldown mode
+    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
+      console.log('[Vercel] API is in cooldown mode, skipping transaction fetch');
+      return [];
+    }
+    
     console.log(`[Vercel] Fetching transactions directly (limit: ${limit})...`);
     
     if (!HELIUS_API_KEY || !HELIUS_RPC_URL || !DISTRIBUTION_WALLET_ADDRESS) {
@@ -748,6 +628,10 @@ async function fetchTransactionsVercel(limit = 5) { // Reduced from 10 to 5 to p
         
         if (error.response && error.response.status === 429) {
           console.log(`[Vercel] Rate limit hit (429), retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+          // Enter cooldown mode if we hit rate limits
+          if (heliusRateLimiter.enterCooldown) {
+            heliusRateLimiter.enterCooldown();
+          }
         } else {
           console.log(`[Vercel] Request error: ${error.message}, retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
         }
@@ -771,261 +655,28 @@ async function fetchTransactionsVercel(limit = 5) { // Reduced from 10 to 5 to p
     const signatures = response.data.result;
     console.log(`[Vercel] Fetched ${signatures.length} signatures`);
     
-    // For Vercel, we'll fetch transaction details for exactly 5 transactions to avoid timeouts
-    const maxToProcess = Math.min(signatures.length, 5); // Reduced from 10 to 5
-    const processedTransactions = [];
-    
-    // Start time tracking
-    const startTime = Date.now();
-    const timeLimit = 5000; // Reduced from 8s to 5s time limit to be more conservative
-    
-    // Process signatures one by one
-    for (let i = 0; i < maxToProcess; i++) {
-      // Check if we're approaching the time limit
-      if (Date.now() - startTime > timeLimit) {
-        console.log(`[Vercel] Approaching time limit, stopping after processing ${i} transactions`);
-        break;
-      }
-      
-      const sig = signatures[i];
-      try {
-        // Prepare request for transaction details
-        const txRequestData = {
-          jsonrpc: '2.0',
-          id: 'tx-details',
-          method: 'getTransaction',
-          params: [
-            sig.signature,
-            {
-              encoding: 'jsonParsed',
-              maxSupportedTransactionVersion: 0
-            }
-          ]
-        };
-        
-        // Add retry logic for transaction details
-        let txRetryCount = 0;
-        let txSuccess = false;
-        let txResponse;
-        
-        while (!txSuccess && txRetryCount < 3) {
-          try {
-            // Make direct request with retry logic
-            txResponse = await axios.post(HELIUS_RPC_URL, txRequestData, {
-              headers: {
-                'Content-Type': 'application/json',
-                'x-api-key': HELIUS_API_KEY
-              },
-              timeout: 10000 // 10 second timeout
-            });
-            
-            txSuccess = true;
-          } catch (txError) {
-            txRetryCount++;
-            const txWaitTime = Math.min(1000 * Math.pow(2, txRetryCount), 10000); // Exponential backoff, max 10 seconds
-            
-            if (txError.response && txError.response.status === 429) {
-              console.log(`[Vercel] Rate limit hit (429) for transaction ${sig.signature}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
-            } else {
-              console.log(`[Vercel] Transaction request error: ${txError.message}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
-            }
-            
-            if (txRetryCount < 3) {
-              await new Promise(resolve => setTimeout(resolve, txWaitTime));
-            } else {
-              console.log(`[Vercel] Max retries reached for transaction ${sig.signature}, skipping`);
-              continue;
-            }
-          }
-        }
-        
-        if (!txSuccess || !txResponse || !txResponse.data || !txResponse.data.result) {
-          console.log(`[Vercel] Invalid response for transaction ${sig.signature}, skipping`);
-          continue;
-        }
-        
-        const txData = txResponse.data.result;
-        
-        // Basic transaction data
-        const transaction = {
-          signature: sig.signature,
-          blockTime: txData.blockTime || sig.blockTime,
-          slot: txData.slot || sig.slot,
-          timestamp: new Date((txData.blockTime || sig.blockTime) * 1000).toISOString(),
-          type: 'unknown',
-          amount: 0,
-          token: 'SOL'
-        };
-        
-        // Simplified transaction processing to avoid timeouts
-        if (txData && txData.meta && !txData.meta.err) {
-          const preBalances = txData.meta.preBalances;
-          const postBalances = txData.meta.postBalances;
-          const accountKeys = txData.transaction.message.accountKeys;
-          
-          if (preBalances && postBalances && accountKeys) {
-            // Find index of distribution wallet
-            const walletIndex = accountKeys.findIndex(key => 
-              key.pubkey === DISTRIBUTION_WALLET_ADDRESS
-            );
-            
-            if (walletIndex >= 0) {
-              const preBal = preBalances[walletIndex];
-              const postBal = postBalances[walletIndex];
-              const diff = postBal - preBal;
-              
-              if (diff > 0) {
-                // Received SOL
-                transaction.type = 'received';
-                transaction.amount = diff / 1e9; // Convert lamports to SOL
-                transaction.token = 'SOL';
-                transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
-              } else if (diff < 0) {
-                // Sent SOL
-                transaction.type = 'sent';
-                transaction.amount = Math.abs(diff) / 1e9; // Convert lamports to SOL
-                transaction.token = 'SOL';
-                transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
-              }
-            }
-          }
-        }
-        
-        processedTransactions.push(transaction);
-        console.log(`[Vercel] Successfully processed transaction: ${sig.signature}`);
-        
-      } catch (error) {
-        console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
-        // Continue with next signature
-        continue;
-      }
-    }
-    
-    console.log(`[Vercel] Processed ${processedTransactions.length} out of ${signatures.length} transactions`);
-    
-    // If we have more signatures to process, trigger a historical fetch
-    if (signatures.length > processedTransactions.length) {
-      console.log(`[Vercel] There are ${signatures.length - processedTransactions.length} more signatures to process, triggering historical fetch...`);
-      nodeSetTimeout(() => {
-        fetchAllHistoricalTransactions().catch(err => 
-          console.error('Error in scheduled historical transaction fetch:', err)
-        );
-      }, 10000); // Wait exactly 10 seconds before starting historical fetch
-    }
-    
-    return processedTransactions;
-  } catch (error) {
-    console.error('[Vercel] Error fetching transactions:', error.message);
-    return [];
-  }
-}
-
-// Fetch transactions from Helius API - Optimized for serverless
-async function fetchTransactions(limit = CONFIG.transactions.maxTransactionsToFetch) {
-  // Check if data collection is disabled
-  if (process.env.DISABLE_DATA_COLLECTION === 'true') {
-    console.log('Data collection is temporarily disabled');
-    return [];
-  }
-  
-  // For Vercel, use the simplified direct fetch
-  if (process.env.VERCEL) {
-    // Try to load from storage first
-    const loadedFromStorage = await storage.load();
-    if (loadedFromStorage && transactions.length > 0) {
-      console.log(`Using ${transactions.length} transactions from storage`);
-      return transactions;
-    }
-    
-    // If no stored data, fetch fresh data
-    return fetchTransactionsVercel(limit);
-  }
-  
-  try {
-    console.log(`Fetching transactions from Helius API (limit: ${limit})...`);
-    
-    if (!HELIUS_API_KEY || !HELIUS_RPC_URL || !DISTRIBUTION_WALLET_ADDRESS) {
-      console.error('Missing required environment variables for Helius service');
-      return [];
-    }
-    
-    // For Vercel, we need to be mindful of the 15-second timeout
-    const startTime = Date.now();
-    
-    // Prepare request data
-    const requestData = {
-      jsonrpc: '2.0',
-      id: 'my-id',
-      method: 'getSignaturesForAddress',
-      params: [
-        DISTRIBUTION_WALLET_ADDRESS,
-        {
-          limit: limit
-        }
-      ]
-    };
-    
-    // Make request to Helius API
-    const response = await heliusRateLimiter.sendRequest(async () => {
-      return await axios.post(HELIUS_RPC_URL, requestData, {
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': HELIUS_API_KEY
-        },
-        timeout: 10000 // 10 second timeout
-      });
-    });
-    
-    // Check if response is valid
-    if (!response.data || !response.data.result) {
-      console.error('Invalid response from Helius API:', response.data);
-      return [];
-    }
-    
-    // Get signatures from response
-    const signatures = response.data.result;
-    console.log(`Fetched ${signatures.length} signatures`);
-    
-    // Filter out signatures that we've already processed
-    const newSignatures = signatures.filter(sig => 
-      !transactions.some(tx => tx.signature === sig.signature)
-    );
-    console.log(`Found ${newSignatures.length} new signatures to process`);
-    
-    // For Vercel, limit the number of signatures we process to avoid timeouts
-    const maxSignaturesToProcess = process.env.VERCEL 
-      ? Math.min(newSignatures.length, CONFIG.vercel.maxTransactionsPerServerlessRequest)
-      : Math.min(newSignatures.length, CONFIG.transactions.maxTransactionsPerRequest);
-    
-    const signaturesToProcess = newSignatures.slice(0, maxSignaturesToProcess);
-    
-    if (signaturesToProcess.length < newSignatures.length) {
-      console.log(`Limiting processing to ${maxSignaturesToProcess} signatures out of ${newSignatures.length} to avoid timeouts`);
-    }
-    
+    // Process each signature
     const newTransactions = [];
     
-    // Process one signature at a time with significant delays between each
-    for (const sig of signaturesToProcess) {
+    // Only process a limited number of signatures to avoid timeouts
+    const maxSignaturesToProcess = Math.min(signatures.length, limit);
+    console.log(`[Vercel] Processing ${maxSignaturesToProcess} out of ${signatures.length} signatures`);
+    
+    for (let i = 0; i < maxSignaturesToProcess; i++) {
+      const sig = signatures[i];
+      
+      // Skip if transaction is already processed
+      const existingTx = transactions.find(tx => tx.signature === sig.signature);
+      if (existingTx) {
+        console.log(`[Vercel] Transaction already exists: ${sig.signature}`);
+        continue;
+      }
+      
       try {
-        // Check if we're approaching the Vercel timeout
-        if (process.env.VERCEL && (Date.now() - startTime) > CONFIG.vercel.maxProcessingTime) {
-          console.log(`Approaching Vercel timeout limit, stopping processing after ${newTransactions.length} transactions`);
-          break;
-        }
-        
-        console.log(`Processing signature: ${sig.signature}`);
-        
+        // Get transaction details
         const txDetails = await getTransactionDetails(sig.signature);
         if (txDetails) {
           newTransactions.push(txDetails);
-          console.log(`Successfully processed transaction: ${sig.signature}`);
-        }
-        
-        // Add a delay between processing signatures, but only if not on Vercel
-        if (!process.env.VERCEL && signaturesToProcess.indexOf(sig) < signaturesToProcess.length - 1) {
-          console.log(`Waiting ${CONFIG.rateLimits.batchDelay}ms before processing next signature...`);
-          await setTimeoutPromise(CONFIG.rateLimits.batchDelay);
         }
       } catch (error) {
         console.error(`Error processing signature ${sig.signature}:`, error.message);
@@ -2352,6 +2003,21 @@ if (process.env.TELEGRAM_BOT_TOKEN && !process.env.VERCEL) {
 // Add a function to fetch historical transactions with pagination
 async function fetchAllHistoricalTransactions() {
   try {
+    // Check if API is shut down
+    if (await checkApiShutdown()) {
+      console.log('[Vercel] API is shut down, skipping historical transaction fetch');
+      return [];
+    }
+    
+    // Check if we're in cooldown mode
+    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
+      console.log('[Vercel] API is in cooldown mode, skipping historical transaction fetch');
+      return [];
+    }
+    
+    // Remove the time-based check to allow continuous scanning
+    // We'll still use rate limiting to prevent API abuse
+    
     console.log('[Vercel] Starting historical transaction fetch...');
     
     if (!HELIUS_API_KEY || !HELIUS_RPC_URL) {
@@ -2370,21 +2036,23 @@ async function fetchAllHistoricalTransactions() {
     const existingSignatures = new Set(transactions.map(tx => tx.signature));
     console.log(`[Vercel] Loaded ${existingSignatures.size} existing transaction signatures`);
     
-    // Remove the time-based check to ensure we always fetch new transactions
-    // regardless of when we last fetched
-    
     let allNewTransactions = [];
     let hasMore = true;
     let beforeSignature = null;
-    const batchSize = 10; // Reduced to 10 signatures at a time
+    const batchSize = 10; // Keep batch size at 10 signatures at a time
     let batchCount = 0;
-    const maxBatches = 1; // Set to 1 to ensure only one batch of 10 transactions per run
+    // Remove the maxBatches limit to allow continuous scanning
+    // const maxBatches = 1; 
     
-    // Start time tracking
+    // Start time tracking - still keep time limit for each serverless function execution
     const startTime = Date.now();
-    const timeLimit = 13000; // Keep the same time limit
+    const timeLimit = 13000; // Keep the same time limit for serverless function
     
-    while (hasMore && batchCount < maxBatches) {
+    // Track if we've found any new transactions in this run
+    let foundNewTransactions = false;
+    
+    // while (hasMore && batchCount < maxBatches) {
+    while (hasMore) {
       // Check if we're approaching the time limit
       if (Date.now() - startTime > timeLimit) {
         console.log(`[Vercel] Approaching time limit, stopping after processing ${batchCount} batches`);
@@ -2431,6 +2099,10 @@ async function fetchAllHistoricalTransactions() {
           
           if (error.response && error.response.status === 429) {
             console.log(`[Vercel] Rate limit hit (429), retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
+            // Enter cooldown mode if we hit rate limits
+            if (heliusRateLimiter.enterCooldown) {
+              heliusRateLimiter.enterCooldown();
+            }
           } else {
             console.log(`[Vercel] Request error: ${error.message}, retrying after ${waitTime}ms (attempt ${retryCount}/5)`);
           }
@@ -2467,9 +2139,10 @@ async function fetchAllHistoricalTransactions() {
       console.log(`[Vercel] Found ${newSignatures.length} new signatures in batch ${batchCount}`);
       
       if (newSignatures.length === 0) {
-        // If we've reached signatures we already have, we can stop
+        // If we've reached signatures we already have, we can stop for this run
+        // but we'll continue in the next run
         if (signatures.length > 0 && existingSignatures.has(signatures[0].signature)) {
-          console.log('[Vercel] Reached signatures that are already in storage, stopping');
+          console.log('[Vercel] Reached signatures that are already in storage, stopping this run');
           hasMore = false;
           break;
         }
@@ -2478,9 +2151,12 @@ async function fetchAllHistoricalTransactions() {
         continue;
       }
       
+      // We found new transactions in this run
+      foundNewTransactions = true;
+      
       // Process new signatures - OPTIMIZED VERSION
-      // Process exactly 10 signatures per run as requested
-      const maxSignaturesToProcess = Math.min(newSignatures.length, 10); // Process exactly 10 signatures per run
+      // Process up to 10 signatures per run to avoid timeouts
+      const maxSignaturesToProcess = Math.min(newSignatures.length, 10);
       const batchProcessedTransactions = [];
       const batchStartTime = Date.now();
       
@@ -2519,28 +2195,24 @@ async function fetchAllHistoricalTransactions() {
           
           while (!txSuccess && txRetryCount < 3) {
             try {
-              // Make direct request with retry logic
+              // Make direct request to Helius API
               txResponse = await axios.post(HELIUS_RPC_URL, txRequestData, {
                 headers: {
                   'Content-Type': 'application/json',
                   'x-api-key': HELIUS_API_KEY
                 },
-                timeout: 10000 // 10 second timeout
+                timeout: 5000 // 5 second timeout for transaction details
               });
               
               txSuccess = true;
-            } catch (txError) {
+            } catch (error) {
               txRetryCount++;
-              const txWaitTime = Math.min(1000 * Math.pow(2, txRetryCount), 10000); // Exponential backoff, max 10 seconds
+              const waitTime = Math.min(1000 * Math.pow(2, txRetryCount), 8000); // Shorter backoff for tx details
               
-              if (txError.response && txError.response.status === 429) {
-                console.log(`[Vercel] Rate limit hit (429) for transaction ${sig.signature}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
-              } else {
-                console.log(`[Vercel] Transaction request error: ${txError.message}, retrying after ${txWaitTime}ms (attempt ${txRetryCount}/3)`);
-              }
+              console.log(`[Vercel] Transaction details error: ${error.message}, retrying after ${waitTime}ms (attempt ${txRetryCount}/3)`);
               
               if (txRetryCount < 3) {
-                await new Promise(resolve => setTimeout(resolve, txWaitTime));
+                await new Promise(resolve => setTimeout(resolve, waitTime));
               } else {
                 console.log(`[Vercel] Max retries reached for transaction ${sig.signature}, skipping`);
                 break;
@@ -2548,109 +2220,50 @@ async function fetchAllHistoricalTransactions() {
             }
           }
           
+          // Check if response is valid
           if (!txSuccess || !txResponse || !txResponse.data || !txResponse.data.result) {
-            console.log(`[Vercel] Invalid response for transaction ${sig.signature}, skipping`);
+            console.log(`[Vercel] Invalid transaction details response for ${sig.signature}, skipping`);
             continue;
           }
           
+          // Process transaction
           const txData = txResponse.data.result;
+          const processedTx = processTransaction(sig.signature, txData);
           
-          // Basic transaction data
-          const transaction = {
-            signature: sig.signature,
-            blockTime: txData.blockTime || sig.blockTime,
-            slot: txData.slot || sig.slot,
-            timestamp: new Date((txData.blockTime || sig.blockTime) * 1000).toISOString(),
-            type: 'unknown',
-            amount: 0,
-            token: 'SOL'
-          };
-          
-          // Simplified transaction processing to avoid timeouts
-          if (txData && txData.meta && !txData.meta.err) {
-            const preBalances = txData.meta.preBalances;
-            const postBalances = txData.meta.postBalances;
-            const accountKeys = txData.transaction.message.accountKeys;
-            
-            if (preBalances && postBalances && accountKeys) {
-              // Find index of distribution wallet
-              const walletIndex = accountKeys.findIndex(key => 
-                key.pubkey === DISTRIBUTION_WALLET_ADDRESS
-              );
-              
-              if (walletIndex >= 0) {
-                const preBal = preBalances[walletIndex];
-                const postBal = postBalances[walletIndex];
-                const diff = postBal - preBal;
-                
-                if (diff > 0) {
-                  // Received SOL
-                  transaction.type = 'received';
-                  transaction.amount = diff / 1e9; // Convert lamports to SOL
-                  transaction.token = 'SOL';
-                  transaction.receiver = DISTRIBUTION_WALLET_ADDRESS;
-                } else if (diff < 0) {
-                  // Sent SOL
-                  transaction.type = 'sent';
-                  transaction.amount = Math.abs(diff) / 1e9; // Convert lamports to SOL
-                  transaction.token = 'SOL';
-                  transaction.sender = DISTRIBUTION_WALLET_ADDRESS;
-                }
-              }
-            }
+          if (processedTx) {
+            // Create and save transaction
+            const tx = new Transaction(processedTx);
+            await tx.save();
+            batchProcessedTransactions.push(tx);
+            allNewTransactions.push(tx);
           }
-          
-          batchProcessedTransactions.push(transaction);
-          console.log(`[Vercel] Successfully processed transaction: ${sig.signature}`);
-          
         } catch (error) {
           console.error(`[Vercel] Error processing transaction ${sig.signature}:`, error.message);
           // Continue with next signature
-          continue;
         }
       }
       
-      console.log(`[Vercel] Processed ${batchProcessedTransactions.length} transactions in batch ${batchCount} (${Date.now() - batchStartTime}ms)`);
-      allNewTransactions = [...allNewTransactions, ...batchProcessedTransactions];
+      console.log(`[Vercel] Processed ${batchProcessedTransactions.length} transactions in ${Date.now() - batchStartTime}ms`);
       
-      // Save after each batch to avoid losing progress
+      // Save after each batch to ensure we don't lose data
       if (batchProcessedTransactions.length > 0) {
-        transactions.push(...batchProcessedTransactions);
-        
-        // Sort transactions by blockTime (newest first)
-        transactions.sort((a, b) => b.blockTime - a.blockTime);
-        
-        lastFetchTimestamp = new Date().toISOString();
-        
-        // Save to persistent storage
-        console.log(`[Vercel] Saving batch ${batchCount} to Blob storage (${transactions.length} total transactions)...`);
-        await storage.save();
-        
-        // Log transaction types and counts for debugging
-        const solTransactions = transactions.filter(tx => tx.token === 'SOL');
-        const sentTransactions = solTransactions.filter(tx => tx.type === 'sent');
-        const receivedTransactions = solTransactions.filter(tx => tx.type === 'received');
-        console.log(`[Vercel] Transaction breakdown after save: ${solTransactions.length} SOL transactions (${sentTransactions.length} sent, ${receivedTransactions.length} received)`);
+        try {
+          await storage.save();
+          console.log(`[Vercel] Saved ${batchProcessedTransactions.length} new transactions to storage`);
+        } catch (saveError) {
+          console.error('[Vercel] Error saving transactions to storage:', saveError.message);
+        }
       }
       
-      // If we've processed some signatures but there are more, we'll stop here
-      // and let the next function call handle the rest to avoid timeouts
-      if (batchProcessedTransactions.length > 0 && newSignatures.length > maxSignaturesToProcess) {
-        console.log(`[Vercel] Processed ${batchProcessedTransactions.length} signatures, but there are ${newSignatures.length - maxSignaturesToProcess} more. Stopping to avoid timeouts.`);
-        break;
-      }
+      // Add a small delay between batches to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
     
     console.log(`[Vercel] Historical fetch complete. Added ${allNewTransactions.length} new transactions in ${batchCount} batches.`);
     
-    // Schedule another run if we have more signatures to process - exactly 10 seconds as requested
-    if (hasMore || (allNewTransactions.length > 0 && existingSignatures.size < 1000)) {
-      console.log('[Vercel] Scheduling another historical fetch to process more signatures...');
-      nodeSetTimeout(() => {
-        fetchAllHistoricalTransactions().catch(err => 
-          console.error('Error in scheduled historical transaction fetch:', err)
-        );
-      }, 10000); // Wait exactly 10 seconds before the next run
+    // Update last fetch time only if we found new transactions
+    if (foundNewTransactions) {
+      storage.lastFetchTime = Date.now();
     }
     
     return allNewTransactions;
@@ -3005,76 +2618,82 @@ async function checkStopCollectionFlag() {
 
 // Function to start background jobs
 function startBackgroundJobs() {
-  if (!CONFIG.backgroundJobs.enabled) {
-    console.log('Background jobs are disabled');
-    return;
-  }
-  
-  console.log('Starting background jobs');
+  console.log('Starting background jobs...');
   
   // Auto-fetch job
+  let autoFetchJobRunning = false;
+  let autoFetchInterval = 120000; // 2 minutes between runs by default
+  
   async function runAutoFetchJob() {
-    // Skip if data collection is disabled
-    if (global.STOP_DATA_COLLECTION || process.env.DISABLE_DATA_COLLECTION === 'true') {
-      console.log('Data collection is disabled, skipping auto-fetch job');
-      // Schedule next run
-      nodeSetTimeout(runAutoFetchJob, CONFIG.backgroundJobs.autoFetchInterval);
-      return;
-    }
-    
-    // Skip if in cooldown mode
-    if (heliusRateLimiter.isInCooldown && heliusRateLimiter.isInCooldown()) {
-      console.log('API is in cooldown mode, skipping auto-fetch job');
-      // Schedule next run with a longer interval
-      nodeSetTimeout(runAutoFetchJob, Math.min(
-        heliusRateLimiter.cooldownPeriod / 2, 
-        CONFIG.backgroundJobs.autoFetchInterval * 2
-      ));
-      return;
-    }
-    
     try {
-      console.log('Running auto-fetch job');
-      backgroundJobState.isRunning = true;
-      backgroundJobState.lastRunTime = Date.now();
-      
-      // Fetch new transactions with a small limit to avoid timeouts
-      const fetchLimit = Math.min(5, CONFIG.transactions.maxTransactionsToFetch);
-      await fetchTransactions(fetchLimit);
-      
-      // Reset consecutive errors on success
-      backgroundJobState.consecutiveErrors = 0;
-      backgroundJobState.currentInterval = CONFIG.backgroundJobs.autoFetchInterval;
-      
-      console.log('Auto-fetch job completed successfully');
-    } catch (error) {
-      console.error('Error in auto-fetch job:', error.message);
-      
-      // Increment consecutive errors and apply backoff
-      backgroundJobState.consecutiveErrors++;
-      
-      if (backgroundJobState.consecutiveErrors >= CONFIG.backgroundJobs.maxConsecutiveErrors) {
-        console.log(`Too many consecutive errors (${backgroundJobState.consecutiveErrors}). Increasing backoff interval.`);
-        
-        // Apply exponential backoff
-        backgroundJobState.currentInterval = Math.min(
-          backgroundJobState.currentInterval * CONFIG.backgroundJobs.errorBackoffMultiplier,
-          CONFIG.backgroundJobs.maxBackoffInterval
-        );
-        
-        console.log(`New backoff interval: ${backgroundJobState.currentInterval}ms`);
+      // Prevent multiple instances from running simultaneously
+      if (autoFetchJobRunning) {
+        console.log('Auto-fetch job already running, skipping this run');
+        return;
       }
-    } finally {
-      backgroundJobState.isRunning = false;
       
-      // Schedule next run with current interval (which may have been increased due to errors)
-      console.log(`Scheduling next auto-fetch job in ${backgroundJobState.currentInterval}ms`);
-      nodeSetTimeout(runAutoFetchJob, backgroundJobState.currentInterval);
+      // Check if API is shut down
+      if (await checkApiShutdown()) {
+        console.log('API is shut down, skipping auto-fetch job');
+        return;
+      }
+      
+      // Check if data collection is disabled
+      if (process.env.DISABLE_DATA_COLLECTION === 'true') {
+        console.log('Data collection is disabled, skipping auto-fetch job');
+        return;
+      }
+      
+      // Mark job as running
+      autoFetchJobRunning = true;
+      
+      console.log('Running auto-fetch job...');
+      
+      // Load existing transactions
+      await storage.load();
+      
+      // Fetch new transactions
+      try {
+        // Use the historical fetch function to get all transactions
+        // This will now scan continuously due to our modifications
+        await fetchAllHistoricalTransactions();
+        console.log('Auto-fetch job completed successfully');
+      } catch (fetchError) {
+        console.error('Error in auto-fetch job:', fetchError.message);
+        
+        // If we hit rate limits, increase the interval temporarily
+        if (fetchError.response && fetchError.response.status === 429) {
+          autoFetchInterval = 300000; // 5 minutes if rate limited
+          console.log(`Rate limit hit, increasing interval to ${autoFetchInterval}ms`);
+        }
+      }
+      
+      // Mark job as complete
+      autoFetchJobRunning = false;
+      
+      // Always schedule the next run, regardless of success or failure
+      // This ensures continuous scanning
+      console.log(`Scheduling next auto-fetch job in ${autoFetchInterval}ms`);
+      nodeSetTimeout(runAutoFetchJob, autoFetchInterval);
+      
+      // Gradually reduce the interval back to normal if it was increased
+      if (autoFetchInterval > 120000) {
+        autoFetchInterval = Math.max(120000, autoFetchInterval - 60000);
+      }
+    } catch (error) {
+      console.error('Unexpected error in auto-fetch job:', error);
+      
+      // Mark job as complete even if there was an error
+      autoFetchJobRunning = false;
+      
+      // Always reschedule, even after errors
+      console.log(`Rescheduling auto-fetch job after error in ${autoFetchInterval}ms`);
+      nodeSetTimeout(runAutoFetchJob, autoFetchInterval);
     }
   }
   
-  // Start the auto-fetch job
-  nodeSetTimeout(runAutoFetchJob, CONFIG.backgroundJobs.autoFetchInterval);
+  // Start the auto-fetch job immediately
+  runAutoFetchJob().catch(err => console.error('Error starting auto-fetch job:', err));
   
   // Also start the stop collection flag check job
   nodeSetTimeout(checkStopCollectionFlag, STOP_COLLECTION_CONFIG.checkInterval);

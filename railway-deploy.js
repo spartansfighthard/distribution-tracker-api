@@ -419,6 +419,32 @@ if (!token) {
         });
       });
 
+      // Stop Vercel API command (admin only)
+      bot.onText(/\/stop_vercel_api/, (msg) => {
+        const chatId = msg.chat.id;
+        
+        requireAdmin(msg, async () => {
+          const statusMessage = await bot.sendMessage(chatId, "⏳ Stopping Vercel API...");
+          
+          try {
+            const response = await fetchFromAPI('/api/admin/stop-api');
+            
+            if (response.success) {
+              await bot.sendMessage(chatId, "✅ *Vercel API Shutdown Initiated*\n\n" + (response.message || "The API has been shut down successfully. It will be unavailable until restarted."), {
+                parse_mode: 'Markdown'
+              });
+            } else {
+              throw new Error(response.error?.message || 'Unknown error');
+            }
+          } catch (error) {
+            console.error('Error stopping Vercel API:', error.message);
+            
+            await bot.sendMessage(chatId, "❌ *Error Stopping Vercel API*\n\n" + error.message, {
+              parse_mode: 'Markdown'
+            });
+          }
+        });
+
       // Force refresh command (admin only)
       bot.onText(/\/force_refresh/, (msg) => {
         const chatId = msg.chat.id;
@@ -498,60 +524,6 @@ if (!token) {
           }
         });
       });
-
-      // Helper function to fetch data from API with error handling
-      async function fetchFromAPI(endpoint) {
-        const url = `${API_BASE_URL}${endpoint}`;
-        const apiKey = process.env.API_KEY;
-        
-        try {
-          const headers = apiKey ? { 'X-API-KEY': apiKey } : {};
-          
-          // Add a shorter timeout for fetch to avoid long waiting times
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
-          
-          const response = await fetch(url, { 
-            headers, 
-            signal: controller.signal 
-          }).finally(() => clearTimeout(timeoutId));
-          
-          if (!response.ok) {
-            if (response.status === 429) {
-              throw new Error('Rate limit exceeded. Please try again later.');
-            } else if (response.status === 500) {
-              throw new Error('API server error. The service may be experiencing issues.');
-            } else {
-              throw new Error(`API responded with status ${response.status}`);
-            }
-          }
-          
-          return await response.json();
-        } catch (error) {
-          console.error(`Error fetching from API (${url}):`, error.message);
-          
-          // If it's a timeout or abort error, provide a more specific message
-          if (error.name === 'AbortError' || error.message.includes('timeout')) {
-            return { 
-              success: false, 
-              error: { message: 'Request timed out. The API is experiencing high load.' },
-              // Provide fallback data for stats endpoint
-              stats: endpoint.includes('/api/stats') ? {
-                title: "SOL Distribution Tracker (Fallback Data)",
-                currentSolBalance: "0.5", // Fallback value
-                totalSolDistributed: "10.0", // Fallback value
-                totalTransactions: "Limited data available",
-                solscanLink: "https://solscan.io/account/HMDVj2Mhax9Kg68yTPo8qH1bcMQuCAqzDatV6d4Wqawv"
-              } : null
-            };
-          }
-          
-          return { 
-            success: false, 
-            error: { message: error.message } 
-          };
-        }
-      }
 
       // Simplified stats command with better error handling and timeout management
       bot.onText(/\/stats/, async (msg) => {
@@ -1022,6 +994,7 @@ if (!token) {
             "*/fetch_all* - Fetch all transactions\n" +
             "*/status* - Check data collection status\n" +
             "*/stop_api* - Stop API data collection\n" +
+            "*/stop_vercel_api* - Stop the Vercel API completely\n" +
             "*/stop* - Stop the bot (will restart automatically)\n";
           
           // Add creator-only commands if the user is the creator
